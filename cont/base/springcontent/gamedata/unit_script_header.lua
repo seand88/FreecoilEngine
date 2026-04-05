@@ -33,6 +33,13 @@ local MultiStopSpin = UnitScript.MultiStopSpin
 local MultiScale = UnitScript.MultiScale
 local MultiExplode = UnitScript.MultiExplode
 
+local PlayAnimation = UnitScript.PlayAnimation
+local StopAnimation = UnitScript.StopAnimation
+local SetAnimationSpeed = UnitScript.SetAnimationSpeed
+local SetAnimationTime = UnitScript.SetAnimationTime
+local GetAnimationTime = UnitScript.GetAnimationTime
+local GetAnimationDuration = UnitScript.GetAnimationDuration
+
 local StartThread = UnitScript.StartThread
 local Signal = UnitScript.Signal
 local SetSignalMask = UnitScript.SetSignalMask
