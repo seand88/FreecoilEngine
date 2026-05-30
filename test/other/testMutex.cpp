@@ -21,6 +21,10 @@
 	#include <sys/futex.h>
 #endif
 
+#ifdef __APPLE__
+	#include <os/lock.h>
+#endif
+
 #ifndef _WIN32
 	#include <unistd.h>
 #endif
@@ -36,6 +40,7 @@ InitSpringTime ist;
 #ifndef _WIN32
 	typedef uint32_t lock;
 
+#ifndef __APPLE__
 	static inline long do_futex (uint32_t *mtx, int op, uint32_t value, const struct timespec *timeout)
 	{
 #ifndef __OpenBSD__
@@ -44,6 +49,7 @@ InitSpringTime ist;
 		return futex(mtx, op, value, timeout, NULL);
 #endif
 	}
+#endif
 
 	static void futex_init(lock* m)
 	{
@@ -55,6 +61,19 @@ InitSpringTime ist;
 		*m = 0;
 	}
 
+#ifdef __APPLE__
+	static os_unfair_lock apple_lock = OS_UNFAIR_LOCK_INIT;
+	static void futex_lock(lock* m)
+	{
+		os_unfair_lock_lock(&apple_lock);
+		*m = 1;
+	}
+	static void futex_unlock(lock* m)
+	{
+		*m = 0;
+		os_unfair_lock_unlock(&apple_lock);
+	}
+#else
 	static void futex_lock(lock* m)
 	{
 		lock c;
@@ -73,6 +92,7 @@ InitSpringTime ist;
 			do_futex(m, FUTEX_WAKE_PRIVATE, 1, NULL);
 		}
 	}
+#endif // __APPLE__
 #endif
 
 

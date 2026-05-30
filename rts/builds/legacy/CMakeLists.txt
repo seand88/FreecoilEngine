@@ -53,11 +53,25 @@ if    (UNIX AND NOT APPLE)
 	find_package(X11 REQUIRED)
 	target_link_libraries(Game PRIVATE X11::Xcursor)
 	list(APPEND engineLibraries ${X11_Xcursor_LIB} ${X11_X11_LIB})
-endif (UNIX)
+endif (UNIX AND NOT APPLE)
 
 if (APPLE)
 	find_library(COREFOUNDATION_LIBRARY Foundation)
 	list(APPEND engineLibraries ${COREFOUNDATION_LIBRARY})
+	# Mesa's EGL is used to bridge OpenGL onto Apple's CAMetalLayer (Kopper/Zink).
+	# Allow MESA_PREFIX (or pkg-config / standard Homebrew layout) to locate it.
+	find_library(EGL_LIBRARY
+		NAMES EGL
+		HINTS
+			$ENV{MESA_PREFIX}/lib
+			/opt/homebrew/opt/mesa/lib
+			/opt/homebrew/lib
+			/usr/local/opt/mesa/lib
+			/usr/local/lib
+		REQUIRED
+	)
+	list(APPEND engineLibraries ${EGL_LIBRARY})
+	list(APPEND engineLibraries objc)
 endif (APPLE)
 
 list(APPEND engineLibraries squish rgetc1)
