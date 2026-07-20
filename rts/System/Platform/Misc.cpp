@@ -29,6 +29,7 @@
 	#include <climits> // for PATH_MAX
 
 	#include <mach-o/dyld.h>
+	#include <sys/sysctl.h>
 
 #elif defined( __FreeBSD__)
 	#include <sys/sysctl.h>
@@ -422,6 +423,26 @@ namespace Platform
 	#else
 	std::string GetHardwareStr() {
 		std::string ret;
+
+	#ifdef __APPLE__
+		// no /proc here; identify the machine for bug reports: model
+		// (e.g. Mac14,14), CPU brand (e.g. Apple M2 Ultra), macOS version
+		{
+			const char* keys[]   = { "hw.model", "machdep.cpu.brand_string", "kern.osproductversion" };
+			const char* labels[] = { "", "", "macOS " };
+
+			char sbuf[256];
+			for (size_t i = 0; i < (sizeof(keys) / sizeof(keys[0])); i++) {
+				size_t slen = sizeof(sbuf) - 1;
+				if (sysctlbyname(keys[i], sbuf, &slen, nullptr, 0) != 0 || slen == 0)
+					continue;
+				sbuf[slen] = 0;
+				ret += labels[i];
+				ret += sbuf;
+				ret += "; ";
+			}
+		}
+	#endif
 
 		FILE* cpuInfo = fopen("/proc/cpuinfo", "r");
 

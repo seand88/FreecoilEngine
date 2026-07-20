@@ -437,6 +437,13 @@ bool SpringApp::InitWindow(const char* title)
 {
 	LOG("[SpringApp::%s] window title: \"%s\"", __func__, title != nullptr ? title : "");
 
+	// distribution/port builds stamp their user-facing release number here so
+	// every infolog attached to a bug report identifies the exact package
+	// (the engine version alone does not — several port releases can share an
+	// engine pin; game content identifies itself via the gametype line)
+	if (const char* portVersion = getenv("BAR_PORT_VERSION"); portVersion != nullptr && portVersion[0] != '\0')
+		LOG("[SpringApp::%s] port/package version: %s", __func__, portVersion);
+
 	// SDL will cause a creation of gpu-driver thread that will clone its name from the starting threads (= this one = mainthread)
 	Threading::SetThreadName("gpu-driver");
 

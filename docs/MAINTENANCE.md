@@ -87,3 +87,16 @@ sign-off before publishing the release.
 primitive-restart, stream-buffer wait, the float→int UB sweep, WindowTitle, …).
 Every commit that lands upstream is one fewer to rebase next version — the
 patch series should trend *smaller*, not larger, as the port matures.
+
+## Ongoing Ehancements and Bug Fixes
+- Don't start fixing a bug until you have developed a way to reliable reproduce it autonymously. Don't implement a new feature without a test and acceptance plan.
+- Ensure you do not cause new regressions to logic, UI, performance such as FPS with any fix. If it touches an area which could cause a regression, make sure you test afterwards as part of the validation of the fix.
+- When making changes or fixes and you notice an unreported bug, do not ignore it, tackle that too once your current task has finished, or make sure it is logged as a bug for a future fix. This includes visual bugs.
+- Make sure you check upstream repos where relevant for similar bug reports or previous fixes.
+- Ensure the fix is done in a way which is as painless as possible to later upstream. If it's not working on Apple and it is working on other platforms, don't simply change the logic for Apple, ask why. Maintainers are unlikely to accept it without good reason.
+- Identify and fix root causes rather than ad-hoc fixes, or if not possible, prompt the user asking what to do.
+- Every graphical fix must come with a regression test in the visreg harness (a testcard cell, scene shot, artifact detector, or logscan pattern that FAILS on the broken behavior), run before/after the fix, and a rebaseline. Run `scripts/visreg.sh --perf` before promoting any graphics/driver/present change. Harness + token-budget rules: `testkit/visreg/README.md` (outer working tree).
+- If an issue cannot be recreated or fixed, or the fix is not fully confident, make sure infolog.txt would carry enough information for the NEXT report to be diagnosable (add targeted log lines / counters around the suspected area, verify they appear, ship them). Every infolog already identifies the port release (BAR_PORT_VERSION line), engine version, and game content (gametype line) — keep it that way.
+- Builds run NO test stages by default (fast artifact gates only). For major changes or large commits, run the tests — with the build (`build-engine.sh --with-synctest --with-visreg [--with-perf]`; same flags on `release-build.sh`, plus `--certify` for replay smoke) or standalone (`scripts/run-synctest.sh`, `scripts/visreg.sh [--perf]`). Shipping artifacts must have passed all of them; skipped stages only warn.
+- Do not respond directly to issues on github unless the user gives explicit consent
+- Active issues can be found here, there may be duplicates: https://github.com/benbreen/RecoilEngine-AppleSilicon/issues
