@@ -6,8 +6,8 @@
 	url = https://github.com/ExaDev/pr-downloader
 [submodule "AI/Skirmish/BARb"]
 	path = AI/Skirmish/BARb
-	url = https://github.com/rlcevg/CircuitAI.git
-	branch = barbarian
+	url = https://github.com/benbreen/CircuitAI.git
+	branch = macos-arm64
 [submodule "AI/Skirmish/CircuitAI"]
 	path = AI/Skirmish/CircuitAI
 	url = https://github.com/rlcevg/CircuitAI.git
