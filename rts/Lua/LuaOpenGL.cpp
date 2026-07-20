@@ -2904,7 +2904,24 @@ int LuaOpenGL::Rect(lua_State* L)
 	const float y1 = luaL_checkfloat(L, 2);
 	const float x2 = luaL_checkfloat(L, 3);
 	const float y2 = luaL_checkfloat(L, 4);
-	glRectf(x1, y1, x2, y2);
+
+	// glRectf is a quad; drivers without native quad support (e.g. Zink on
+	// Metal, which lacks geometry shaders) lower it to triangles and lose the
+	// edge flags, so glPolygonMode(GL_LINE) shows the internal diagonal.
+	// Emit the outline/points directly instead — identical output on
+	// conformant GL, correct output on quad-lowering drivers.
+	GLint polyModes[2] = {GL_FILL, GL_FILL};
+	glGetIntegerv(GL_POLYGON_MODE, polyModes);
+	if (polyModes[0] != GL_FILL) {
+		glBegin((polyModes[0] == GL_LINE) ? GL_LINE_LOOP : GL_POINTS);
+		glVertex2f(x1, y1);
+		glVertex2f(x2, y1);
+		glVertex2f(x2, y2);
+		glVertex2f(x1, y2);
+		glEnd();
+	} else {
+		glRectf(x1, y1, x2, y2);
+	}
 	return 0;
 }
 
