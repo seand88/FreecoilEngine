@@ -4181,6 +4181,15 @@ int LuaOpenGL::Texture(lua_State* L)
 		tex.Enable(true);
 		tex.Bind();
 	} else {
+		// failed binds keep the PREVIOUS texture bound; for lua-created ("!")
+		// names this means a stale handle is about to draw unrelated content
+		if (!imgName.empty() && imgName[0] == LuaTextures::prefix) {
+			static int warned = 0;
+			if (warned < 20) {
+				warned++;
+				LOG_L(L_WARNING, "gl.Texture: failed to bind lua texture \"%s\" (stale name?)", imgName.c_str());
+			}
+		}
 		lua_pushboolean(L, false);
 	}
 
@@ -4624,8 +4633,17 @@ int LuaOpenGL::RenderToTexture(lua_State* L)
 	const LuaTextures& textures = CLuaHandle::GetActiveTextures(L);
 	const LuaTextures::Texture* tex = textures.GetInfo(texture);
 
-	if ((tex == nullptr) || (tex->fbo == 0))
+	if ((tex == nullptr) || (tex->fbo == 0)) {
+		// a silent no-op here leaves the target texture unwritten and callers
+		// then draw stale/undefined content — surface it (bounded, not spam)
+		static int warned = 0;
+		if (warned < 20) {
+			warned++;
+			LOG_L(L_WARNING, "gl.RenderToTexture: no-op for texture \"%s\" (%s)",
+					texture.c_str(), (tex == nullptr) ? "unknown name" : "texture has no FBO");
+		}
 		return 0;
+	}
 
 	GLint currentFBO = 0;
 	if (drawMode == DRAW_WORLD_SHADOW) {
