@@ -176,3 +176,6 @@ build-*
 .kilo
 
 /.i-understand-git-submodules.txt
+# macOS port: local build dependencies and packaged app output
+/deps
+/release-artifacts
