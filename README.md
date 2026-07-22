@@ -10,7 +10,7 @@
 
 **This project is an unofficial native Apple Silicon port of the
 [Recoil](https://github.com/beyond-all-reason/RecoilEngine) RTS engine** — the
-engine itself now runs macOS with no Rosetta and no virtual machine. This means games (such as BAR) can now run natively on macOS. It contains a series of fixes to make sure the behaviour of the game on Apple Silicon matches exactly that of other platforms, plus a series of Apple specific performance improvements.
+engine itself now runs macOS with no Rosetta and no virtual machine. It achieves 100% sync match between macOS and officially supported platforms such as Windows. This means games (such as BAR) can now run natively on macOS. It contains a series of fixes to make sure the behaviour of the game on Apple Silicon matches exactly that of other platforms, plus a series of Apple specific performance improvements.
 
 > [!IMPORTANT]
 > If you run into issues, please report them [here](https://github.com/benbreen/RecoilEngine-AppleSilicon/issues) — **not** in the official Beyond All Reason or Recoil channels. They can't help with problems caused by this port.
