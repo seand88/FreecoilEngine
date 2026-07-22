@@ -40,6 +40,13 @@ void log_backend_registerCleanup(log_cleanup_ptr cleanupFunc);
  */
 void log_backend_unregisterCleanup(log_cleanup_ptr cleanupFunc);
 
+/**
+ * Emit any pending "previous line repeated N more time(s)" rollup held by the
+ * generic repeat-coalescer, so a flood's residual tail count is not lost at
+ * shutdown. Invoked from log_backend_cleanup().
+ */
+void log_backend_flushRepeats();
+
 ///@}
 
 #ifdef __cplusplus

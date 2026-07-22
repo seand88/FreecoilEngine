@@ -790,10 +790,11 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 
 	// Stall detector: draw-frame gaps beyond 150ms land in the infolog with a
 	// timestamped snapshot, so freeze/pause-blur reports match to log lines
-	// (sim catchup vs pause vs slow frame) instead of screenshots.
-	// Bounded: the first 100 gaps log individually, after that every 100th
-	// (with the running total), so a degenerate session cannot flood the
-	// infolog. Disable with SPRING_NO_STALL_LOG=1.
+	// (sim catchup vs pause vs slow frame) instead of screenshots. A stall
+	// storm cannot flood the log: the generic repeat-coalescer in the log
+	// backend collapses these structurally-identical lines into periodic
+	// "repeated N more time(s)" rollups (no ad-hoc throttle needed here).
+	// Disable with SPRING_NO_STALL_LOG=1.
 	{
 		static const bool s_stallLog = (getenv("SPRING_NO_STALL_LOG") == nullptr);
 		const spring_time nowST = spring_now();
@@ -802,8 +803,7 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 			if (gapMs > 150.0f) {
 				static uint32_t s_stallCount = 0;
 				++s_stallCount;
-				if (s_stallCount <= 100 || (s_stallCount % 100) == 0)
-					LOG_L(L_WARNING, "[stall] draw gap %.0fms (drawFrame=%u, stalls=%u)", gapMs, drawFrame, s_stallCount);
+				LOG_L(L_WARNING, "[stall] draw gap %.0fms (drawFrame=%u, stalls=%u)", gapMs, drawFrame, s_stallCount);
 			}
 		}
 	}

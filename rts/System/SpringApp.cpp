@@ -186,6 +186,10 @@ static void ConsolePrintInitialize(const std::string& configSource, bool safemod
 
 static void FlushExit()
 {
+	// Flush the log at process exit: emits the generic repeat-coalescer's final
+	// "repeated N more time(s)" rollup (so a flood's tail count survives) and
+	// flushes the open log files. Registered via atexit in the ctor; runs before
+	// the log sinks' static destructors, so the files are still open here.
 	LOG_CLEANUP();
 	std::fflush(stdout);
 }
