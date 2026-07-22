@@ -19,6 +19,7 @@
 */
 
 
+#include <cmath>
 #include "MouseInput.h"
 #include "InputHandler.h"
 
@@ -78,8 +79,16 @@ static int2 ScaleMouseCoords(int x, int y)
 		SDL_GetWindowSize(globalRendering->sdlWindow, &sdlW, &sdlH);
 	if (sdlW < 1) sdlW = 1;
 	if (sdlH < 1) sdlH = 1;
-	const int scaledX = (int)((float)x * (float)globalRendering->viewSizeX / (float)sdlW);
-	const int scaledY = (int)((float)y * (float)globalRendering->viewSizeY / (float)sdlH);
+	// Map the last reachable logical coordinate (sdl size - 1) onto the last
+	// pixel coordinate (viewSize - 1): plain size-ratio scaling tops out 2px
+	// short of the right/bottom edge on 2x Retina, which broke edge scrolling
+	// there (engine edge tests compare against viewSize - 1; issue #7).
+	const int scaledX = (sdlW > 1)
+		? (int)std::lround((double)x * (double)(globalRendering->viewSizeX - 1) / (double)(sdlW - 1))
+		: 0;
+	const int scaledY = (sdlH > 1)
+		? (int)std::lround((double)y * (double)(globalRendering->viewSizeY - 1) / (double)(sdlH - 1))
+		: 0;
 	return int2(scaledX, scaledY);
 }
 
