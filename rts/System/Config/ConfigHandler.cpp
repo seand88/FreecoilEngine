@@ -10,9 +10,99 @@
 #include "System/UnorderedMap.hpp"
 #include "System/Threading/SpringThreading.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include <chrono>
+#include <mutex>
 #include <stdexcept>
 
 CONFIG(bool, StoreDefaultSettings).defaultValue(false).description("springsettings.cfg will save the settings values, if they match the implicit defaults and were set by a user explicitly");
+
+/******************************************************************************/
+// Runtime settings-change logging (KEEP; off by default).
+//
+// The startup "<User Config>" block (CLogOutput::LogConfigInfo) records every
+// non-default setting present at launch, but says nothing about settings that
+// change DURING play (options menu, hotkeys, Lua Spring.SetConfig*, in-game
+// resolution changes, ...). This makes such mutations diagnosable: set the
+// environment variable SPRING_DBG_CONFIG=1 and every actual config change is
+// recorded under the "Config" log section with key, old value, new value and
+// source (persistent vs overlay). Lines are tagged "[config]".
+//
+// Spam guard: the SetString no-op guard already drops writes of the current
+// value, so identical hammering never reaches here. On top of that we dedup
+// runs of the SAME (key -> value) transition within a short window (counting
+// how many were collapsed) — distinct value changes are ALWAYS logged, never
+// dropped.
+#define LOG_SECTION_CONFIG "Config"
+LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_CONFIG)
+
+namespace {
+	static bool ConfigDbgEnabled()
+	{
+		static const bool enabled = []() {
+			const char* e = getenv("SPRING_DBG_CONFIG");
+			return (e != nullptr && e[0] != '\0' && e[0] != '0');
+		}();
+		return enabled;
+	}
+
+	// Dedup identical consecutive (key -> value) transitions within this window;
+	// collapsed count is reported when the next distinct change for the key logs.
+	constexpr int64_t CFG_DEDUP_WINDOW_MS = 500;
+
+	struct ConfigLogState {
+		std::string lastValue;
+		int64_t     lastMs = 0;
+		unsigned    suppressed = 0;
+	};
+
+	spring::mutex                                     cfgLogMutex;
+	spring::unsynced_map<std::string, ConfigLogState> cfgLogState;
+
+	static int64_t NowMs()
+	{
+		using namespace std::chrono;
+		return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+	}
+
+	// Emit a settings-change line (guarded by the dedup window). `oldValue` may
+	// be "(unset)" if the key had no prior value.
+	static void LogConfigChange(const std::string& key, const std::string& oldValue,
+	                            const std::string& value, bool useOverlay)
+	{
+		if (!ConfigDbgEnabled())
+			return;
+
+		const char* source = useOverlay ? "overlay" : "persistent";
+		const int64_t now = NowMs();
+
+		std::lock_guard<spring::mutex> lck(cfgLogMutex);
+		ConfigLogState& st = cfgLogState[key];
+
+		if (st.lastValue == value && (now - st.lastMs) < CFG_DEDUP_WINDOW_MS) {
+			// identical repeat inside the window: collapse, remember it happened
+			st.suppressed++;
+			st.lastMs = now;
+			return;
+		}
+
+		if (st.suppressed > 0) {
+			LOG_SL(LOG_SECTION_CONFIG, L_NOTICE,
+				"[config] (%u identical repeat(s) of '%s' collapsed)", st.suppressed, key.c_str());
+			st.suppressed = 0;
+		}
+
+		LOG_SL(LOG_SECTION_CONFIG, L_NOTICE,
+			"[config] %s: '%s' -> '%s' (source: %s)",
+			key.c_str(), oldValue.c_str(), value.c_str(), source);
+
+		st.lastValue = value;
+		st.lastMs = now;
+	}
+}
 
 /******************************************************************************/
 
@@ -307,6 +397,12 @@ std::string ConfigHandlerImpl::GetString(const std::string& key) const
  */
 void ConfigHandlerImpl::SetString(const std::string& key, const std::string& value, bool useOverlay, bool notify)
 {
+	// capture the effective pre-change value for diagnostic logging (see
+	// LogConfigChange); cheap only when SPRING_DBG_CONFIG is enabled
+	std::string oldValue;
+	if (ConfigDbgEnabled())
+		oldValue = IsSet(key) ? GetString(key) : "(unset)";
+
 	// if we set something to be persisted,
 	// we do want to override the overlay value
 	if (!useOverlay)
@@ -315,6 +411,9 @@ void ConfigHandlerImpl::SetString(const std::string& key, const std::string& val
 	// Don't do anything if value didn't change.
 	if (IsSet(key) && GetString(key) == value)
 		return;
+
+	// reaching here means the value actually changed
+	LogConfigChange(key, oldValue, value, useOverlay);
 
 	if (useOverlay) {
 		overlay->SetString(key, value);

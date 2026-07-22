@@ -20,6 +20,7 @@
 
 
 #include <cmath>
+#include <cstdlib>
 #include "MouseInput.h"
 #include "InputHandler.h"
 
@@ -27,13 +28,54 @@
 #include "Rendering/GlobalRendering.h"
 #include "System/MainDefines.h"
 #include "System/SafeUtil.h"
+#include "System/Log/ILog.h"
 
 #include <SDL_events.h>
 #include <SDL_hints.h>
 #include <SDL_syswm.h>
+#include <SDL_touch.h>
 #ifdef __APPLE__
 #include <SDL_video.h>
 #endif
+
+
+// Diagnostic input-method logging (KEEP; off by default).
+//
+// Rationale: several input reports (issue #7 edge-scroll, trackpad / precise-
+// scroll complaints) arrive without the reporter's device, and we cannot tell
+// from an ordinary infolog what the engine actually received. Setting the
+// environment variable SPRING_DBG_INPUT=1 makes every SDL mouse/wheel/motion
+// event get recorded under the "Input" log section with its SOURCE (physical
+// mouse vs touch/trackpad, via SDL_TOUCH_MOUSEID), scroll direction
+// (normal/flipped) and — the crucial macOS bit — precise/pixel deltas
+// (trackpad two-finger + momentum scrolling) vs integer line deltas (a notched
+// wheel). A user reporting a scroll/trackpad/edge issue can then attach an
+// infolog that fully describes the event stream. Lines are tagged "[input]".
+#define LOG_SECTION_INPUT "Input"
+LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_INPUT)
+#ifdef LOG_SECTION_CURRENT
+	#undef LOG_SECTION_CURRENT
+#endif
+#define LOG_SECTION_CURRENT LOG_SECTION_INPUT
+
+namespace {
+	// Checked once and cached; zero runtime cost when disabled.
+	static bool InputDbgEnabled()
+	{
+		static const bool enabled = []() {
+			const char* e = getenv("SPRING_DBG_INPUT");
+			return (e != nullptr && e[0] != '\0' && e[0] != '0');
+		}();
+		return enabled;
+	}
+
+	// SDL sets `which` to SDL_TOUCH_MOUSEID for events synthesized from touch
+	// input; a real device id means a physical mouse/trackpad HID.
+	static const char* MouseSrcStr(Uint32 which)
+	{
+		return (which == SDL_TOUCH_MOUSEID) ? "touch/trackpad" : "mouse";
+	}
+}
 
 
 IMouseInput* mouseInput = nullptr;
@@ -122,6 +164,26 @@ bool IMouseInput::HandleSDLMouseEvent(const SDL_Event& event)
 				mouse->MouseMove(mousepos.x, mousepos.y, event.motion.xrel, event.motion.yrel);
 #endif
 
+			if (InputDbgEnabled()) {
+				// Plain motion floods, so throttle it to ~1 line/100ms; but ALWAYS
+				// log a drag (any button held — this covers middle-drag scrolling)
+				// and motion that reaches a viewport edge (edge-scroll reports).
+				static Uint32 lastMotionLogMs = 0;
+				const bool dragging = (event.motion.state != 0);
+				const bool atEdge =
+					(mousepos.x <= globalRendering->viewPosX) ||
+					(mousepos.y <= globalRendering->viewWindowOffsetY) ||
+					(mousepos.x >= globalRendering->viewPosX + globalRendering->viewSizeX - 1) ||
+					(mousepos.y >= globalRendering->viewWindowOffsetY + globalRendering->viewSizeY - 1);
+				if (dragging || atEdge || (Uint32)(event.motion.timestamp - lastMotionLogMs) >= 100u) {
+					lastMotionLogMs = event.motion.timestamp;
+					LOG_L(L_NOTICE, "[input] motion src=%s pos=%d,%d rel=%d,%d btnmask=0x%02x%s%s",
+						MouseSrcStr(event.motion.which), mousepos.x, mousepos.y,
+						event.motion.xrel, event.motion.yrel, (unsigned)event.motion.state,
+						dragging ? " DRAG" : "", atEdge ? " EDGE" : "");
+				}
+			}
+
 		} break;
 		case SDL_MOUSEBUTTONDOWN: {
 #ifdef __APPLE__
@@ -134,6 +196,11 @@ bool IMouseInput::HandleSDLMouseEvent(const SDL_Event& event)
 			if (mouse != nullptr && !mouse->IsButtonEmulated(event.button.button))
 				mouse->MousePress(mousepos.x, mousepos.y, event.button.button);
 
+			if (InputDbgEnabled())
+				LOG_L(L_NOTICE, "[input] button DOWN src=%s btn=%u clicks=%u pos=%d,%d",
+					MouseSrcStr(event.button.which), (unsigned)event.button.button,
+					(unsigned)event.button.clicks, mousepos.x, mousepos.y);
+
 		} break;
 		case SDL_MOUSEBUTTONUP: {
 #ifdef __APPLE__
@@ -145,8 +212,28 @@ bool IMouseInput::HandleSDLMouseEvent(const SDL_Event& event)
 			if (mouse != nullptr && !mouse->IsButtonEmulated(event.button.button))
 				mouse->MouseRelease(mousepos.x, mousepos.y, event.button.button);
 
+			if (InputDbgEnabled())
+				LOG_L(L_NOTICE, "[input] button UP   src=%s btn=%u clicks=%u pos=%d,%d",
+					MouseSrcStr(event.button.which), (unsigned)event.button.button,
+					(unsigned)event.button.clicks, mousepos.x, mousepos.y);
+
 		} break;
 		case SDL_MOUSEWHEEL: {
+			if (InputDbgEnabled()) {
+				// The key diagnostic for scroll/trackpad reports. On macOS a
+				// notched wheel arrives as integer line deltas (preciseY == y);
+				// trackpad two-finger scrolling and momentum/inertial scrolling
+				// arrive as high-frequency fractional precise (pixel) deltas
+				// (preciseY != y). "flipped" == macOS natural-scroll direction.
+				const bool flipped = (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED);
+				const bool precise = (event.wheel.preciseX != (float)event.wheel.x) ||
+				                     (event.wheel.preciseY != (float)event.wheel.y);
+				LOG_L(L_NOTICE, "[input] wheel  src=%s dir=%s line=%d,%d precise=%.4f,%.4f %s",
+					MouseSrcStr(event.wheel.which), flipped ? "flipped" : "normal",
+					event.wheel.x, event.wheel.y, event.wheel.preciseX, event.wheel.preciseY,
+					precise ? "PRECISE/pixel" : "LINE/notch");
+			}
+
 			if (mouse != nullptr)
 				mouse->MouseWheel(event.wheel.y);
 
@@ -154,6 +241,8 @@ bool IMouseInput::HandleSDLMouseEvent(const SDL_Event& event)
 		case SDL_WINDOWEVENT: {
 			switch (event.window.event) {
 				case SDL_WINDOWEVENT_ENTER: {
+					if (InputDbgEnabled())
+						LOG_L(L_NOTICE, "[input] window ENTER");
 					if (mouse != nullptr)
 						mouse->WindowEnter();
 				} break;
@@ -164,6 +253,8 @@ bool IMouseInput::HandleSDLMouseEvent(const SDL_Event& event)
 						globalRendering->viewWindowOffsetY + (globalRendering->viewSizeY >> 1)
 					};
 
+					if (InputDbgEnabled())
+						LOG_L(L_NOTICE, "[input] window LEAVE");
 					if (mouse != nullptr)
 						mouse->WindowLeave();
 				} break;
