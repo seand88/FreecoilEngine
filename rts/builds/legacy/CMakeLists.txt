@@ -79,7 +79,14 @@ if (APPLE)
 	find_library(METAL_LIBRARY Metal)
 	find_library(QUARTZCORE_LIBRARY QuartzCore)
 	find_library(IOSURFACE_LIBRARY IOSurface)
-	list(APPEND engineLibraries ${METAL_LIBRARY} ${QUARTZCORE_LIBRARY} ${IOSURFACE_LIBRARY})
+	# AppKit (NSScreen class ref) + CoreGraphics (display-mode enumeration) +
+	# IOKit (gpu-core-count) for the hardware-aware default render resolution
+	# (MacPresentBackend.mm EffectiveBackingScale: panel-native + GPU
+	# pixel-budget caps).
+	find_library(APPKIT_LIBRARY AppKit)
+	find_library(COREGRAPHICS_LIBRARY CoreGraphics)
+	find_library(IOKIT_LIBRARY IOKit)
+	list(APPEND engineLibraries ${METAL_LIBRARY} ${QUARTZCORE_LIBRARY} ${IOSURFACE_LIBRARY} ${APPKIT_LIBRARY} ${COREGRAPHICS_LIBRARY} ${IOKIT_LIBRARY})
 	set(SPRING_MAC_LIBEGL "" CACHE FILEPATH
 		"Optional path to a Mesa libEGL.dylib (e.g. a Zink+KosmicKrisp build). \
 Leave empty to link only against Apple's OpenGL.framework.")

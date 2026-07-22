@@ -6,6 +6,9 @@
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <IOKit/IOKitLib.h>
+#import <IOKit/graphics/IOGraphicsTypes.h> // kDisplayModeNativeFlag
 
 #include <EGL/egl.h>
 #include <SDL.h>
@@ -130,22 +133,120 @@ void* AttachMetalLayer(SDL_Window* window)
 	return (void*)view;
 }
 
+NSWindow* NSWindowFor(SDL_Window* window)
+{
+	SDL_SysWMinfo wmInfo;
+	SDL_VERSION(&wmInfo.version);
+	if (!SDL_GetWindowWMInfo(window, &wmInfo))
+		return nil;
+
+	return (NSWindow*)wmInfo.info.cocoa.window;
+}
+
 // NSWindow.backingScaleFactor (1.0 on non-Retina, 2.0 on standard Retina).
 // Used to size the pbuffer (= GL default framebuffer) in physical pixels so
 // full-resolution rendering isn't clipped.
 double BackingScaleFactor(SDL_Window* window)
 {
-	SDL_SysWMinfo wmInfo;
-	SDL_VERSION(&wmInfo.version);
-	if (!SDL_GetWindowWMInfo(window, &wmInfo))
-		return 1.0;
-
-	NSWindow* nswindow = (NSWindow*)wmInfo.info.cocoa.window;
+	NSWindow* nswindow = NSWindowFor(window);
 	if (nswindow == nil)
 		return 1.0;
 
 	const double scale = [nswindow backingScaleFactor];
 	return (scale > 0.0) ? scale : 1.0;
+}
+
+// Physical panel resolution of the given screen's display: the largest mode
+// carrying kDisplayModeNativeFlag. NB "largest mode overall" over-reports —
+// macOS synthesizes supersampled scaled modes bigger than the panel (e.g.
+// 7680x3240 on a 5120x2160 panel). Cached per display id; mode enumeration
+// is not free and this runs on every window resize.
+bool NativePanelPixels(NSScreen* screen, double& outW, double& outH)
+{
+	outW = 0.0;
+	outH = 0.0;
+
+	if (screen == nil)
+		return false;
+
+	NSNumber* num = [screen deviceDescription][@"NSScreenNumber"];
+	if (num == nil)
+		return false;
+
+	const CGDirectDisplayID did = (CGDirectDisplayID)[num unsignedIntValue];
+
+	static CGDirectDisplayID cachedId = kCGNullDirectDisplay;
+	static double cachedW = 0.0;
+	static double cachedH = 0.0;
+
+	if (did != cachedId) {
+		double bestW = 0.0;
+		double bestH = 0.0;
+
+		CFStringRef optKey = kCGDisplayShowDuplicateLowResolutionModes;
+		CFDictionaryRef opts = CFDictionaryCreate(nullptr,
+				(const void**)&optKey, (const void**)&kCFBooleanTrue, 1,
+				&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+		CFArrayRef modes = CGDisplayCopyAllDisplayModes(did, opts);
+		if (opts != nullptr)
+			CFRelease(opts);
+
+		if (modes != nullptr) {
+			for (CFIndex i = 0; i < CFArrayGetCount(modes); i++) {
+				CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+				if ((CGDisplayModeGetIOFlags(m) & kDisplayModeNativeFlag) == 0)
+					continue;
+				const double w = (double)CGDisplayModeGetPixelWidth(m);
+				const double h = (double)CGDisplayModeGetPixelHeight(m);
+				if (w * h > bestW * bestH) {
+					bestW = w;
+					bestH = h;
+				}
+			}
+			CFRelease(modes);
+		}
+
+		cachedId = did;
+		cachedW = bestW;
+		cachedH = bestH;
+	}
+
+	outW = cachedW;
+	outH = cachedH;
+	return (cachedW > 0.0 && cachedH > 0.0);
+}
+
+// Apple-GPU core count from the IORegistry ("gpu-core-count" on the
+// IOAccelerator node); 0 when unavailable. Used only to size the default
+// render-resolution budget below.
+int GpuCoreCount()
+{
+	static int cached = -1;
+	if (cached >= 0)
+		return cached;
+
+	cached = 0;
+
+	io_iterator_t it = IO_OBJECT_NULL;
+	if (IOServiceGetMatchingServices(MACH_PORT_NULL, IOServiceMatching("IOAccelerator"), &it) == KERN_SUCCESS) {
+		io_object_t obj = IO_OBJECT_NULL;
+		while ((obj = IOIteratorNext(it)) != IO_OBJECT_NULL) {
+			CFTypeRef v = IORegistryEntrySearchCFProperty(obj, kIOServicePlane, CFSTR("gpu-core-count"),
+					kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+			if (v != nullptr) {
+				if (CFGetTypeID(v) == CFNumberGetTypeID()) {
+					int n = 0;
+					CFNumberGetValue((CFNumberRef)v, kCFNumberIntType, &n);
+					cached = std::max(cached, n);
+				}
+				CFRelease(v);
+			}
+			IOObjectRelease(obj);
+		}
+		IOObjectRelease(it);
+	}
+
+	return cached;
 }
 
 } // anonymous namespace
@@ -221,7 +322,9 @@ bool CreateContext(SDL_Window* window)
 	SDL_GetWindowSize(window, &winW, &winH);
 	const double bsfTrue   = BackingScaleFactor(window);
 	const bool   noRetina  = (getenv("SPRING_MAC_NO_RETINA") != nullptr);
-	const double bsf       = noRetina ? 1.0 : bsfTrue;
+	// backing scale with the hardware-aware default-resolution caps
+	// (panel-native + GPU pixel budget) applied; see EffectiveBackingScale
+	const double bsf       = EffectiveBackingScale(window);
 	int pxW = (int)(winW * bsf + 0.5);
 	int pxH = (int)(winH * bsf + 0.5);
 	if (pxW <= 0 || pxH <= 0) { pxW = 1280; pxH = 720; }
@@ -404,10 +507,85 @@ void GetDrawableSize(int& w, int& h)
 	h = pbufH;
 }
 
+// Effective render scale = NSWindow.backingScaleFactor with two
+// hardware-aware caps, so the DEFAULT render resolution is sensible on any
+// machine without touching (or ever overriding) the user's configured
+// window size/resolution — those are in points and stay fully honored;
+// only the default-framebuffer pixel density changes.
+//
+// Cap 1 — never render more pixels than the physical panel can display.
+// macOS "scaled" desktop modes back the desktop with MORE pixels than the
+// panel has (M2 Air 13.6" default "looks like 1470x956" = 2940x1912 backing
+// on a 2560x1664 panel = +31% pixels) and the window server downsamples.
+// Rendering at that oversized backing burns GPU fragment/bandwidth time on
+// pixels that never reach the screen — capping to the panel ratio is
+// fidelity-neutral by construction.
+//
+// Cap 2 — pixel budget for small GPUs driving large displays (e.g. an Air
+// on a 5K monitor): the default framebuffer is kept within ~0.6 MPixels per
+// Apple-GPU core (M2 Air, 10 cores -> 6.0 MP: its own 4.3 MP panel is
+// unaffected, a 14.7 MP 5K desktop is capped; M2 Ultra, 60 cores -> 36 MP:
+// never capped). Skipped when the core count cannot be read.
+//
+// Never drops below 1.0 (logical resolution). Overrides:
+//   SPRING_MAC_NO_RETINA=1    force 1x rendering (strongest, pre-existing)
+//   SPRING_MAC_FULL_BACKING=1 disable both caps (raw backing scale, i.e.
+//                             deliberate supersampling on scaled desktops)
 double EffectiveBackingScale(SDL_Window* window)
 {
-	const bool noRetina = (getenv("SPRING_MAC_NO_RETINA") != nullptr);
-	return noRetina ? 1.0 : BackingScaleFactor(window);
+	if (getenv("SPRING_MAC_NO_RETINA") != nullptr)
+		return 1.0;
+
+	const double bsf = BackingScaleFactor(window);
+
+	if (getenv("SPRING_MAC_FULL_BACKING") != nullptr)
+		return bsf;
+
+	double scale = bsf;
+	const char* capReason = "";
+
+	NSWindow* nswindow = NSWindowFor(window);
+	NSScreen* screen = (nswindow != nil) ? [nswindow screen] : nil;
+	if (screen == nil)
+		screen = [NSScreen mainScreen];
+
+	// cap 1: panel-native
+	double panelW = 0.0;
+	double panelH = 0.0;
+	const NSSize desktopPts = (screen != nil) ? [screen frame].size : NSMakeSize(0.0, 0.0);
+	if (NativePanelPixels(screen, panelW, panelH) && desktopPts.width > 0.0 && desktopPts.height > 0.0) {
+		const double panelScale = std::min(panelW / desktopPts.width, panelH / desktopPts.height);
+		if (panelScale < scale) {
+			scale = panelScale;
+			capReason = " — capped to panel-native (scaled desktop backing > panel)";
+		}
+	}
+
+	// cap 2: GPU pixel budget (applies to the actual window area in points)
+	const int gpuCores = GpuCoreCount();
+	int winW = 0;
+	int winH = 0;
+	SDL_GetWindowSize(window, &winW, &winH);
+	if (gpuCores > 0 && winW > 0 && winH > 0) {
+		const double budgetPx = double(gpuCores) * 600.0e3;
+		if (double(winW) * double(winH) * scale * scale > budgetPx) {
+			scale = std::sqrt(budgetPx / (double(winW) * double(winH)));
+			capReason = " — capped by GPU pixel budget (small GPU, large display)";
+		}
+	}
+
+	scale = std::clamp(scale, std::min(1.0, bsf), bsf);
+
+	static double loggedScale = -1.0;
+	if (std::fabs(scale - loggedScale) > 1e-3) {
+		loggedScale = scale;
+		LOG("[EGL] effective backing scale %.3f (raw %.2f, window %dx%d pt, desktop %.0fx%.0f pt, panel %.0fx%.0f px, %d GPU cores)%s",
+				scale, bsf, winW, winH,
+				(double)desktopPts.width, (double)desktopPts.height,
+				panelW, panelH, gpuCores, capReason);
+	}
+
+	return scale;
 }
 
 // Recreate the pbuffer (the engine's default framebuffer) at the window's

@@ -36,8 +36,12 @@ namespace MacPresent {
 	// recreate the pbuffer at the window's current pixel size so resizes
 	// render at true resolution; no-op when unchanged or before CreateContext
 	void ResizeIfNeeded(SDL_Window* window);
-	// NSWindow.backingScaleFactor, honoring SPRING_MAC_NO_RETINA (render at
-	// logical 1x and let CoreAnimation upscale)
+	// NSWindow.backingScaleFactor with hardware-aware default-resolution
+	// caps: never above the physical panel's pixel ratio (macOS scaled
+	// desktops back the desktop with more pixels than the panel shows) and
+	// within a per-GPU-core pixel budget (small GPU + large display), never
+	// below 1x. Honors SPRING_MAC_NO_RETINA (force 1x) and
+	// SPRING_MAC_FULL_BACKING (raw backing scale, no caps).
 	double EffectiveBackingScale(SDL_Window* window);
 
 	// read the default framebuffer back and present it onto the CAMetalLayer.
