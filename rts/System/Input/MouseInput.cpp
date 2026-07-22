@@ -19,6 +19,7 @@
 */
 
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include "MouseInput.h"
@@ -367,6 +368,22 @@ bool IMouseInput::WarpPos(int2 pos)
 		 * but apparently this prevents this work-around from working (?!). */
 		SDL_ShowCursor(SDL_DISABLE);
 	#endif
+
+#ifdef __APPLE__
+	// pos is in engine view coordinates (backing pixels — the inverse of
+	// ScaleMouseCoords); SDL_WarpMouseInWindow expects logical points. Warping
+	// with pixel coords lands at 2x the intended position on Retina (and gets
+	// clamped at the window edge). Map [0, viewSize-1] -> [0, sdlSize-1].
+	{
+		int sdlW = 1, sdlH = 1;
+		if (globalRendering->sdlWindow != nullptr)
+			SDL_GetWindowSize(globalRendering->sdlWindow, &sdlW, &sdlH);
+		const int vsx = std::max(2, globalRendering->viewSizeX);
+		const int vsy = std::max(2, globalRendering->viewSizeY);
+		pos.x = (int)std::lround((double)pos.x * (double)(std::max(2, sdlW) - 1) / (double)(vsx - 1));
+		pos.y = (int)std::lround((double)pos.y * (double)(std::max(2, sdlH) - 1) / (double)(vsy - 1));
+	}
+#endif
 
 	SDL_WarpMouseInWindow(globalRendering->GetWindow(), pos.x, pos.y);
 

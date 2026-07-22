@@ -254,6 +254,8 @@ int GpuCoreCount()
 
 namespace MacPresent {
 
+void CaptureBootDisplayModes(); // defined below (boot display-mode snapshot)
+
 bool CreateContext(SDL_Window* window)
 {
 	// Default the KosmicKrisp Metal shader compiler to fast math (what native
@@ -262,6 +264,10 @@ bool CreateContext(SDL_Window* window)
 	// spill events and 32→51.5 fps on the m7 arena from this alone.
 	// Overridable: export KK_MATH_MODE=safe|relaxed|fast before launch.
 	setenv("KK_MATH_MODE", "fast", 0); // 0 = don't overwrite user's value
+
+	// remember every display's boot mode for RestoreDesktopDisplayMode
+	CaptureBootDisplayModes();
+
 	MAC_DLOG("[EGL] eglGetDisplay(EGL_DEFAULT_DISPLAY)...\n");
 	eglDpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 	MAC_DLOG("[EGL] eglGetDisplay -> %p (lastError=0x%x)\n", (void*)eglDpy, eglGetError());
@@ -586,6 +592,134 @@ double EffectiveBackingScale(SDL_Window* window)
 	}
 
 	return scale;
+}
+
+// Boot ("desktop") display modes, captured once at CreateContext — the game
+// always boots with every display at the user's configured mode. Used to put
+// a single display back after exclusive fullscreen strands it in a lowered
+// mode. NB: CGRestorePermanentDisplayConfiguration was tried first and is the
+// WRONG hammer — it reconfigures every display and relocated the game window
+// onto the secondary (virtual) display, violating display preservation.
+static std::vector<std::pair<CGDirectDisplayID, CGDisplayModeRef>> s_bootDisplayModes;
+
+void CaptureBootDisplayModes()
+{
+	if (!s_bootDisplayModes.empty())
+		return;
+	CGDirectDisplayID ids[16];
+	uint32_t cnt = 0;
+	if (CGGetActiveDisplayList(16, ids, &cnt) != kCGErrorSuccess)
+		return;
+	for (uint32_t i = 0; i < cnt; i++) {
+		CGDisplayModeRef m = CGDisplayCopyDisplayMode(ids[i]); // retained
+		if (m != nullptr)
+			s_bootDisplayModes.emplace_back(ids[i], m);
+	}
+}
+
+// See MacPresentBackend.h. Leaving SDL exclusive fullscreen does not reliably
+// restore the lowered display mode on this stack (observed: display stuck at
+// 1920x1080 for 12+ s after SDL_SetWindowFullscreen(window, 0); no window
+// event fires, so nothing downstream corrects it either). When the engine
+// switches to any NON-exclusive mode, compare the window's display point
+// size against the expected desktop size and — on mismatch — set THAT
+// display back to its boot mode (per-display, no global reconfiguration).
+void RestoreDesktopDisplayMode(SDL_Window* window, int desktopW, int desktopH)
+{
+	if (desktopW <= 0 || desktopH <= 0)
+		return;
+
+	NSWindow* nswindow = NSWindowFor(window);
+	NSScreen* screen = (nswindow != nil) ? [nswindow screen] : nil;
+	if (screen == nil)
+		screen = [NSScreen mainScreen];
+	if (screen == nil)
+		return;
+
+	const NSSize cur = [screen frame].size;
+	if ((int)std::lround(cur.width) == desktopW && (int)std::lround(cur.height) == desktopH)
+		return;
+
+	NSNumber* num = [screen deviceDescription][@"NSScreenNumber"];
+	if (num == nil)
+		return;
+	const CGDirectDisplayID did = (CGDirectDisplayID)[num unsignedIntValue];
+
+	for (const auto& [bootDid, bootMode] : s_bootDisplayModes) {
+		if (bootDid != did)
+			continue;
+		LOG("[EGL] display %u at %.0fx%.0f pt != desktop %dx%d pt after leaving exclusive fullscreen — restoring its boot mode",
+				did, cur.width, cur.height, desktopW, desktopH);
+		CGDisplaySetDisplayMode(did, bootMode, nullptr);
+		return;
+	}
+}
+
+// See MacPresentBackend.h. Ensures BAR's "windowed fullscreen" (desktop-sized
+// borderless window) truly covers the whole screen: Cocoa places/zooms
+// normal-level windows within the visibleFrame (menu bar + Dock excluded;
+// SDL_MaximizeWindow = [NSWindow zoom:] does the same), which exposed dead
+// screen bands where the cursor left the window (SDL LEAVE -> pointer
+// recentre -> edge scroll broken at those edges; v0.12-RC bug 1).
+// borderless-fullscreen enforcement state: remembered so PresentFrame can
+// re-assert AFTER async display reconfiguration. Leaving exclusive fullscreen
+// restores the desktop display mode asynchronously; if the borderless frame
+// was enforced against the still-lowered mode (e.g. 1920x1080 while the 1080p
+// exclusive mode is being torn down), the window would keep that stale frame
+// forever — the mode restore emits NO window resize event. The periodic
+// re-check (every ~60 presents; a frame fetch + compare, setFrame only when
+// different) converges to a no-op once the frame matches the screen.
+static bool        s_blFullscreenActive = false;
+static SDL_Window* s_blFullscreenWindow = nullptr;
+
+void EnforceBorderlessFullscreenFrame(SDL_Window* window, bool active)
+{
+	s_blFullscreenActive = active;
+	s_blFullscreenWindow = window;
+
+	NSWindow* nswindow = NSWindowFor(window);
+	if (nswindow == nil)
+		return;
+
+	if (!active) {
+		// leaving borderless-fullscreen: give the menu bar + Dock back.
+		// (SDL's exclusive-fullscreen path manages its own presentation.)
+		if ([NSApp presentationOptions] != NSApplicationPresentationDefault)
+			[NSApp setPresentationOptions:NSApplicationPresentationDefault];
+		return;
+	}
+
+	// never fight SDL while the window is (still) in an SDL fullscreen state
+	// (mode transitions tear down asynchronously)
+	if ((SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0)
+		return;
+
+	NSScreen* screen = [nswindow screen];
+	if (screen == nil)
+		screen = [NSScreen mainScreen];
+	if (screen == nil)
+		return;
+
+	// Auto-hide the menu bar + Dock while the game is frontmost so the whole
+	// panel belongs to the window (AppKit requires AutoHideDock together with
+	// AutoHideMenuBar). They reveal on deliberate edge hover, as users expect
+	// from borderless mode; system UI returns automatically on app switch.
+	const NSApplicationPresentationOptions wanted =
+			NSApplicationPresentationAutoHideMenuBar | NSApplicationPresentationAutoHideDock;
+	if ([NSApp presentationOptions] != wanted)
+		[NSApp setPresentationOptions:wanted];
+
+	// Borderless styleMask windows are exempt from frame constraining, so an
+	// explicit setFrame: to the screen frame (menu-bar band included) sticks.
+	// SDL observes the change via windowDidResize/windowDidMove and updates
+	// its window size/position, so SDL_GetWindowSize + the engine geometry
+	// chain (SIZE_CHANGED -> UpdateGLGeometry) stay consistent.
+	const NSRect target = [screen frame];
+	if (!NSEqualRects([nswindow frame], target)) {
+		[nswindow setFrame:target display:YES];
+		LOG("[EGL] borderless-fullscreen frame enforced: %.0fx%.0f pt at (%.0f,%.0f)",
+				target.size.width, target.size.height, target.origin.x, target.origin.y);
+	}
 }
 
 // Recreate the pbuffer (the engine's default framebuffer) at the window's
@@ -929,6 +1063,15 @@ bool PresentFrame()
 	// SDL swap
 	if (eglDpy == EGL_NO_DISPLAY || eglSfc == EGL_NO_SURFACE)
 		return false;
+
+	// self-heal the borderless-fullscreen frame after async display-mode
+	// restores (see EnforceBorderlessFullscreenFrame): cheap periodic check,
+	// no-op when the frame already matches the screen
+	{
+		static unsigned frameTick = 0;
+		if (s_blFullscreenActive && s_blFullscreenWindow != nullptr && (++frameTick % 60u) == 0u)
+			EnforceBorderlessFullscreenFrame(s_blFullscreenWindow, true);
+	}
 
 	// eglSwapBuffers on the (surfaceless) pbuffer presents nowhere, so
 	// read the rendered default framebuffer back and blit it onto the

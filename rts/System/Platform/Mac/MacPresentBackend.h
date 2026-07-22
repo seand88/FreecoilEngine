@@ -44,6 +44,23 @@ namespace MacPresent {
 	// SPRING_MAC_FULL_BACKING (raw backing scale, no caps).
 	double EffectiveBackingScale(SDL_Window* window);
 
+	// Desktop-sized borderless windows ("windowed fullscreen", BAR's actual
+	// fullscreen mode) must cover the ENTIRE screen. Cocoa constrains
+	// normal-level windows to the visibleFrame (menu bar + Dock excluded),
+	// leaving dead screen bands the cursor escapes into. With active=true
+	// this forces the NSWindow frame to the full screen frame (legal for a
+	// borderless styleMask) and auto-hides the menu bar and Dock while the
+	// app is frontmost; active=false restores default presentation options.
+	// Called from CGlobalRendering::SetWindowAttributes on every mode change.
+	void EnforceBorderlessFullscreenFrame(SDL_Window* window, bool active);
+
+	// Leaving SDL exclusive fullscreen can strand the display in the lowered
+	// mode (no event fires). Restores the user's permanent display
+	// configuration when the window's display size differs from the expected
+	// desktop point size; no-op otherwise. Call when applying a
+	// non-exclusive mode.
+	void RestoreDesktopDisplayMode(SDL_Window* window, int desktopW, int desktopH);
+
 	// read the default framebuffer back and present it onto the CAMetalLayer.
 	// Returns false when the EGL context is not up — the caller falls back to
 	// SDL_GL_SwapWindow.

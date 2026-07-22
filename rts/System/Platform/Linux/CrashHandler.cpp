@@ -938,9 +938,17 @@ namespace CrashHandler
 	void HandleSignal(int signal, siginfo_t* siginfo, void* pctx)
 	{
 		switch (signal) {
-			case SIGINT: {
-				// ctrl+c = kill
-				LOG("[%s] caught SIGINT, aborting", __func__);
+			case SIGINT:
+			case SIGTERM: {
+				// ctrl+c / external terminate = kill. SIGTERM was previously
+				// left to SDL's silent default handler, so an externally
+				// TERMed game shut down cleanly with NO log evidence of why
+				// (indistinguishable from a self-quit — cost real triage
+				// time). Log it WITH the sender pid before quitting.
+				LOG("[%s] caught %s (sender pid=%d uid=%d), aborting", __func__,
+						(signal == SIGINT) ? "SIGINT" : "SIGTERM",
+						(siginfo != nullptr) ? (int)siginfo->si_pid : -1,
+						(siginfo != nullptr) ? (int)siginfo->si_uid : -1);
 
 				// first try a clean exit
 				SDL_Event event;
@@ -955,7 +963,9 @@ namespace CrashHandler
 				#ifndef DEDICATED
 				Watchdog::ClearTimers(false, false);
 				#endif
-				LOG("[%s] caught SIGCONT, resuming", __func__);
+				LOG("[%s] caught SIGCONT, resuming (sender pid=%d uid=%d)", __func__,
+						(siginfo != nullptr) ? (int)siginfo->si_pid : -1,
+						(siginfo != nullptr) ? (int)siginfo->si_uid : -1);
 				return;
 			} break;
 			default: {
@@ -1052,6 +1062,7 @@ namespace CrashHandler
 		sigaction(SIGFPE,  &sa, nullptr); // div0 and more
 		sigaction(SIGABRT, &sa, nullptr);
 		sigaction(SIGINT,  &sa, nullptr);
+		sigaction(SIGTERM, &sa, nullptr); // external terminate: log sender, clean quit
 		// sigaction(SIGSTOP, &sa, nullptr); // cannot be caught
 		sigaction(SIGCONT, &sa, nullptr);
 		sigaction(SIGBUS,  &sa, nullptr); // on macosx EXC_BAD_ACCESS (mach exception) is translated to SIGBUS
@@ -1070,6 +1081,7 @@ namespace CrashHandler
 		sigaction(SIGFPE,  &sa, nullptr);
 		sigaction(SIGABRT, &sa, nullptr);
 		sigaction(SIGINT,  &sa, nullptr);
+		sigaction(SIGTERM, &sa, nullptr);
 		// sigaction(SIGSTOP, &sa, nullptr);
 		sigaction(SIGCONT, &sa, nullptr);
 		sigaction(SIGBUS,  &sa, nullptr);

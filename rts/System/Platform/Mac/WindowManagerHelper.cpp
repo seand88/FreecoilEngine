@@ -20,7 +20,11 @@ int GetWindowState(SDL_Window* window)
 
 void SetWindowResizable(SDL_Window* window, bool resizable)
 {
-	//FIXME implement?
+	// Was a stub: the engine window stayed permanently resizable on macOS,
+	// so fullscreen/borderless windows kept the resizable styleMask (and the
+	// fullscreen-Space eligibility SDL derives from it) against
+	// SetWindowAttributes' intent. SDL2 implements this portably.
+	SDL_SetWindowResizable(window, resizable ? SDL_TRUE : SDL_FALSE);
 }
 
 }; // namespace WindowManagerHelper
