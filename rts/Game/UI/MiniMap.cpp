@@ -53,8 +53,23 @@
 #include "System/Sound/ISoundChannels.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "System/Log/ILog.h"
+
+#include <cstdlib>
 
 using namespace GL::State;
+
+// SPRING_DBG_INPUT=1 diagnostic (KEEP; off by default, zero cost when unset):
+// traces whether minimap presses reach CMiniMap and arm the selection box —
+// pairs with the MouseInput.cpp event logging under the same env var.
+static bool MiniMapInputDbg()
+{
+	static const bool enabled = []() {
+		const char* e = getenv("SPRING_DBG_INPUT");
+		return (e != nullptr && e[0] != '\0' && e[0] != '0');
+	}();
+	return enabled;
+}
 
 
 CONFIG(std::string, MiniMapGeometry).defaultValue("2 2 200 200");
@@ -698,6 +713,13 @@ bool CMiniMap::MousePress(int x, int y, int button)
 	const bool inMap = mapBox.Inside(x, y);
 	const bool inButtons = buttonBox.Inside(x, y);
 
+	if (MiniMapInputDbg()) {
+		LOG("[input] minimap press x=%d y=%d btn=%d inMap=%d inButtons=%d inCommand=%d chorded=%d mapBox=%d,%d,%d,%d",
+		    x, y, button, (int)inMap, (int)inButtons, guihandler->inCommand,
+		    (int)mouse->buttons[SDL_BUTTON_LEFT].chorded,
+		    mapBox.xmin, mapBox.ymin, mapBox.xmax, mapBox.ymax);
+	}
+
 	if (!inMap && !inButtons)
 		return false;
 
@@ -722,6 +744,9 @@ bool CMiniMap::MousePress(int x, int y, int button)
 		}
 		if (inMap && !mouse->buttons[SDL_BUTTON_LEFT].chorded) {
 			selecting = true;
+			if (MiniMapInputDbg()) {
+				LOG("[input] minimap selecting=1 (press consumed)");
+			}
 			return true;
 		}
 	}
@@ -1520,6 +1545,14 @@ void CMiniMap::DrawCameraFrustumAndMouseSelection()
 
 	// selection box
 	CMouseHandler::ButtonPressEvt& bp = mouse->buttons[SDL_BUTTON_LEFT];
+	if (MiniMapInputDbg() && selecting) {
+		static int dbgN = 0;
+		if ((dbgN++ % 30) == 0) {
+			LOG("[input] minimap selbox state fullProxy=%d movement=%d thresh=%d bp=%d,%d last=%d,%d",
+			    (int)fullProxy, (int)bp.movement, (int)mouse->dragSelectionThreshold,
+			    bp.x, bp.y, mouse->lastx, mouse->lasty);
+		}
+	}
 	if (selecting && fullProxy && (bp.movement > mouse->dragSelectionThreshold)) {
 		const float3 oldMapPos = GetMapPosition(bp.x, bp.y);
 		const float3 newMapPos = GetMapPosition(mouse->lastx, mouse->lasty);
