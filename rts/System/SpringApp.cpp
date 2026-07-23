@@ -1175,6 +1175,24 @@ bool SpringApp::MainEventHandler(const SDL_Event& event)
 						mouseInput->InstallWndCallback();
 					}
 
+#if defined(__APPLE__) && !defined(HEADLESS)
+					// Re-clip the borderless-fullscreen cursor confinement to the
+					// window's NEW size. The grab applied during the windowed->
+					// borderless transition clipped to the transient (smaller) rect,
+					// leaving a ~1cm dead band at the top/right/bottom until a focus
+					// cycle. SDL_SetWindowGrab early-returns when the grab state is
+					// unchanged, so a plain re-assert would NOT re-clip — toggle it
+					// off then on to force SDL to re-confine to the current rect.
+					// Only in borderless-fullscreen; windowed resizes are never
+					// confined.
+					if (globalRendering->borderless || globalRendering->fullScreen) {
+						globalRendering->SetWindowInputGrabbing(false);
+						globalRendering->SetWindowInputGrabbing(true);
+						LOG("[SpringApp::%s][macgrab-reclip] re-confined cursor to new size wsx=%d wsy=%d",
+						    __func__, globalRendering->winSizeX, globalRendering->winSizeY);
+					}
+#endif
+
 					LOG("[SpringApp::%s][SDL_WINDOWEVENT_SIZE_CHANGED][2]\n", __func__);
 				} break;
 				case SDL_WINDOWEVENT_MAXIMIZED:
@@ -1222,6 +1240,15 @@ bool SpringApp::MainEventHandler(const SDL_Event& event)
 				case SDL_WINDOWEVENT_FOCUS_GAINED: {
 					// update keydown table
 					KeyInput::Update(keyBindings.GetFakeMetaKey());
+#if defined(__APPLE__) && !defined(HEADLESS)
+					// Re-confine the cursor when returning to a borderless-fullscreen
+					// window: FOCUS_LOST released the grab on cmd-tab, and without
+					// re-asserting it here edge-scroll toward an adjacent display
+					// would break after the first app switch. Windowed mode (neither
+					// borderless nor fullScreen) is never confined.
+					if (globalRendering->borderless || globalRendering->fullScreen)
+						globalRendering->SetWindowInputGrabbing(true);
+#endif
 				} break;
 				case SDL_WINDOWEVENT_FOCUS_LOST: {
 					Watchdog::ClearTimer(WDT_MAIN, true);

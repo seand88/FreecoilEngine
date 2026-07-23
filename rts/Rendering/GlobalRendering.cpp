@@ -428,19 +428,6 @@ SDL_Window* CGlobalRendering::CreateSDLWindow(const char* title) const
 	int winPosY_ = configHandler->GetInt("WindowPosY");
 	int2 newRes = GetCfgWinRes();
 
-#if defined(__APPLE__) && !defined(HEADLESS)
-	// On macOS keep windowed mode bordered (title bar + window controls)
-	// regardless of WindowBorderless, which the Chobby lobby forces on at
-	// runtime — EXCEPT when the borderless window is desktop-sized: that is
-	// BAR's actual "Fullscreen" mode (Fullscreen=0 + WindowBorderless=1 +
-	// desktop-sized window); bordering it turns fullscreen into a window.
-	if (!fullScreen_ && borderless_) {
-		const int2 maxRes_ = GetMaxWinRes();
-		if (newRes.x < maxRes_.x || newRes.y < maxRes_.y)
-			borderless_ = false;
-	}
-#endif
-
 	// note:
 	//   passing the minimized-flag is useless (state is not saved if minimized)
 	//   and has no effect anyway, setting a minimum size for a window overrides
@@ -452,12 +439,20 @@ SDL_Window* CGlobalRendering::CreateSDLWindow(const char* title) const
 	//   and 0 for windowed mode.
 
 #if defined(__APPLE__) && !defined(HEADLESS)
+	// macOS: any fullscreen request (WindowBorderless, or the deprecated exclusive
+	// Fullscreen — never a display-mode capture here) is created as genuine
+	// windowed-fullscreen (FULLSCREEN_DESKTOP); SetWindowAttributes (called right
+	// after creation) re-applies the exact policy incl. the on-screen windowed
+	// clamp. The visreg fixed-size rig (SPRING_MAC_FIXED_WINDOW) is created plain
+	// windowed. Never SDL_WINDOW_FULLSCREEN (deprecated CGDisplayCapture on macOS).
+	const bool macFixedWindow_ = (getenv("SPRING_MAC_FIXED_WINDOW") != nullptr);
 	uint32_t sdlFlags  = (SDL_WINDOW_RESIZABLE);
+	         sdlFlags |= (SDL_WINDOW_FULLSCREEN_DESKTOP * ((fullScreen_ || borderless_) && !macFixedWindow_));
 #else
 	uint32_t sdlFlags  = (SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-#endif
 	         sdlFlags |= (borderless_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_FULLSCREEN) * fullScreen_;
 	         sdlFlags |= (SDL_WINDOW_BORDERLESS * borderless_);
+#endif
 
 	for (size_t i = 0; i < (aaLvls.size()) && (newWindow == nullptr); i++) {
 		if (i > 0 && aaLvls[i] == aaLvls[i - 1])
@@ -1339,60 +1334,62 @@ void CGlobalRendering::SetWindowTitle(const std::string& title)
 
 void CGlobalRendering::SetWindowAttributes(SDL_Window* window)
 {
+	// macOS fullscreen/borderless (2026-07-23 rewrite): realise both via SDL's
+	// own SDL_WINDOW_FULLSCREEN_DESKTOP and let SDL own sizing + display
+	// selection. Empirically verified with an isolated SDL 2.32.10 probe on the
+	// exact repro rig (a 2x scaled-Retina "looks like 2560x1080" ultrawide + a 1x
+	// 4608x2880 virtual display): FS_DESKTOP sizes the window to the display's
+	// POINT size (2560x1080, NOT the 5120x2160 backing), realises it on the
+	// display the window already occupies (no migration to the virtual display),
+	// and auto-hides the menu bar + Dock. The earlier belief that
+	// "SDL_GetDisplayBounds returns pixels post-startup" and that SDL oversizes
+	// fullscreen is FALSE for this SDL version (that probe returned 2560x1080
+	// points for both). The prior workarounds — hand-sizing/repositioning the
+	// window and a manual NSWindow setFrame — are what pushed the window centre
+	// onto the neighbour and produced the 2x-oversized, display-jumping frame;
+	// they are removed. HiDPI render density is applied independently via
+	// EffectiveBackingScale, so on-screen fidelity is unchanged.
+
 	// Get wanted state
 	borderless = configHandler->GetBool("WindowBorderless");
 	fullScreen = configHandler->GetBool("Fullscreen");
 
 #if defined(__APPLE__) && !defined(HEADLESS)
-	// Leaving exclusive fullscreen can strand the display in the lowered
-	// mode (no event announces the restore failure); ensure the desktop mode
-	// is back before computing any geometry against it.
+	// Safety: if some prior run left the display in a captured/lowered video mode,
+	// restore the desktop mode before computing geometry. This build never
+	// captures the display (see the policy below), so normally a no-op.
 	if (!fullScreen) {
 		const int2 desktopRes_ = GetMaxWinRes();
 		MacPresent::RestoreDesktopDisplayMode(window, desktopRes_.x, desktopRes_.y);
 	}
 
-	// Keep windowed mode bordered on macOS even when Chobby sets WindowBorderless
-	// at runtime (this path runs on its ConfigNotify) — except when the borderless
-	// window is desktop-sized: that is BAR's "Fullscreen" mode (Fullscreen=0 +
-	// WindowBorderless=1 + desktop-sized window); bordering it breaks fullscreen.
-	// "Desktop-sized" accepts EITHER the SDL desktop mode or the display's
-	// current bounds: mid mode-restore the two disagree, and a borderless
-	// request sized to the transient bounds (Chobby reads GetScreenGeometry
-	// live) must stay borderless — bordering it would leave the game in a
-	// wrong mode until the next transition.
-	if (!fullScreen && borderless) {
-		const int2 cfgRes_ = GetCfgWinRes();
-		const int2 maxRes_ = GetMaxWinRes();
-		SDL_Rect curBounds_;
-		GetDisplayBounds(curBounds_);
-		const bool desktopSized =
-				(cfgRes_.x >= maxRes_.x && cfgRes_.y >= maxRes_.y) ||
-				(cfgRes_.x >= curBounds_.w && cfgRes_.y >= curBounds_.h);
-		if (!desktopSized)
-			borderless = false;
-	}
+	// ── macOS window-mode policy (2026-07-23) ───────────────────────────────────
+	//  * Windowed (Fullscreen=0, WindowBorderless=0): a bordered, movable window,
+	//    sized to FIT ON the screen (clamped below — a saved size larger than the
+	//    display is overridden down).
+	//  * Borderless fullscreen (WindowBorderless=1): GENUINE windowed-fullscreen via
+	//    SDL_WINDOW_FULLSCREEN_DESKTOP, covering the CURRENT screen; the saved
+	//    resolution is irrelevant (SDL sizes it to the display).
+	//  * Exclusive/"real" fullscreen (Fullscreen=1) is a display-mode CAPTURE,
+	//    deprecated on macOS and NO LONGER SUPPORTED — it is mapped to the same
+	//    borderless fullscreen. So ANY fullscreen request => FULLSCREEN_DESKTOP,
+	//    never a capture. The old resolution-based "is this borderless really
+	//    fullscreen?" demotion is gone: WindowBorderless always means fullscreen.
+	//
+	// The visreg regression rig renders to a FIXED-SIZE bordered window and must
+	// NOT be promoted to fullscreen. It CANNOT be told apart by
+	// EGL_PLATFORM=surfaceless — the normal launcher sets that too, for the
+	// KosmicKrisp Metal present path (wrongly assuming surfaceless==offscreen
+	// silently broke the real game: it disabled fullscreen and stripped the border,
+	// giving a non-fullscreen borderless window with the menu bar overlapping). So
+	// the rig sets SPRING_MAC_FIXED_WINDOW=1 instead.
+	const bool macFixedWindow    = (getenv("SPRING_MAC_FIXED_WINDOW") != nullptr);
+	const bool macWantFullscreen = (fullScreen || borderless) && !macFixedWindow;
+	LOG("[GR::%s][macfs-rewrite-20260723] macWantFullscreen=%d fullScreen=%d borderless=%d fixedWin=%d",
+	    __func__, int(macWantFullscreen), int(fullScreen), int(borderless), int(macFixedWindow));
 #endif
 	winPosX = configHandler->GetInt("WindowPosX");
 	winPosY = configHandler->GetInt("WindowPosY");
-
-#if defined(__APPLE__) && !defined(HEADLESS)
-	// DISPLAY PINNING: a mode change (windowed <-> borderless <-> exclusive
-	// fullscreen, or a resolution change) must keep the window on the display
-	// it currently occupies — only an explicit user drag may move it. The
-	// configured WindowPosX/Y is windowed-mode state; on multi-display
-	// setups (e.g. a secondary/virtual display) blindly re-applying it here
-	// would relocate the fullscreen/borderless window to whichever display
-	// the config coordinates happen to fall on. SDL selects the fullscreen
-	// target display from the window position, so pinning the position to
-	// the current display's origin pins the mode change to that display.
-	if (fullScreen || borderless) {
-		SDL_Rect curDisplayBounds;
-		GetDisplayBounds(curDisplayBounds); // display the window is on now
-		winPosX = curDisplayBounds.x;
-		winPosY = curDisplayBounds.y;
-	}
-#endif
 
 	// update display count
 	numDisplays = SDL_GetNumVideoDisplays();
@@ -1413,6 +1410,53 @@ void CGlobalRendering::SetWindowAttributes(SDL_Window* window)
 	SDL_RestoreWindow(window);
 	SDL_SetWindowMinimumSize(window, minRes.x, minRes.y);
 
+#if defined(__APPLE__) && !defined(HEADLESS)
+	if (macWantFullscreen) {
+		// GENUINE borderless fullscreen for the CURRENT display. Hand SDL the
+		// window IN PLACE (no pre-resize/reposition) and let FULLSCREEN_DESKTOP
+		// size it to the display's point size, pick the display the window already
+		// occupies, and hide the menu bar + Dock. Covers WindowBorderless and the
+		// (deprecated, remapped) exclusive-fullscreen request alike; the saved
+		// resolution is irrelevant. Pre-sizing/repositioning is what previously
+		// pushed the centre onto a neighbour and oversized the window — don't.
+		if (SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP) != 0)
+			LOG("[GR::%s][4][SDL_SetWindowFullscreen] err=\"%s\"", __func__, SDL_GetError());
+		SDL_SetWindowBordered(window, SDL_FALSE);
+	} else if (macFixedWindow) {
+		// visreg regression rig: an EXACT fixed-size bordered window. Do NOT clamp
+		// to the display — it renders at a size independent of any physical screen.
+		if (SDL_SetWindowFullscreen(window, 0u) != 0)
+			LOG("[GR::%s][4][SDL_SetWindowFullscreen] err=\"%s\"", __func__, SDL_GetError());
+		SDL_SetWindowBordered(window, SDL_TRUE);
+		SDL_SetWindowPosition(window, winPosX, winPosY);
+		SDL_SetWindowSize(window, newRes.x, newRes.y);
+	} else {
+		// Normal WINDOWED mode: bordered + movable, CLAMPED to fit fully on screen.
+		// Never larger than the display's USABLE area (menu bar + Dock excluded),
+		// minus a margin for the title bar, so the whole window is visible and the
+		// cursor reaches every edge (a full-display-sized window lands with its
+		// title bar under the menu bar and its bottom off-screen). Any saved size
+		// bigger than the screen — physical-pixel resolutions, or a now-smaller
+		// display — is overridden DOWN here.
+		if (SDL_SetWindowFullscreen(window, 0u) != 0)
+			LOG("[GR::%s][4][SDL_SetWindowFullscreen] err=\"%s\"", __func__, SDL_GetError());
+		SDL_SetWindowBordered(window, SDL_TRUE);
+		int macDi = SDL_GetWindowDisplayIndex(window);
+		if (macDi < 0) macDi = 0;
+		SDL_Rect ub; SDL_GetDisplayUsableBounds(macDi, &ub);
+		constexpr int kTitleBar = 28, kMargin = 8;
+		const int maxW = std::max(minRes.x, ub.w - kMargin);
+		const int maxH = std::max(minRes.y, ub.h - kTitleBar - kMargin);
+		newRes.x = std::min(newRes.x, maxW);
+		newRes.y = std::min(newRes.y, maxH);
+		winPosX = std::clamp(winPosX, ub.x, std::max(ub.x, ub.x + ub.w - newRes.x));
+		winPosY = std::clamp(winPosY, ub.y, std::max(ub.y, ub.y + ub.h - newRes.y));
+		SDL_SetWindowSize(window, newRes.x, newRes.y);
+		SDL_SetWindowPosition(window, winPosX, winPosY);
+		LOG("[GR::%s][macwin] windowed fit: usable=<%d,%d %dx%d> -> res=<%d,%d> pos=<%d,%d>",
+		    __func__, ub.x, ub.y, ub.w, ub.h, newRes.x, newRes.y, winPosX, winPosY);
+	}
+#else
 	SDL_SetWindowPosition(window, winPosX, winPosY);
 	SDL_SetWindowSize(window, newRes.x, newRes.y);
 
@@ -1420,6 +1464,7 @@ void CGlobalRendering::SetWindowAttributes(SDL_Window* window)
 		LOG("[GR::%s][4][SDL_SetWindowFullscreen] err=\"%s\"", __func__, SDL_GetError());
 
 	SDL_SetWindowBordered(window, borderless ? SDL_FALSE : SDL_TRUE);
+#endif
 
 #if defined(__APPLE__) && !defined(HEADLESS)
 	// SDL_MaximizeWindow is [NSWindow zoom:] on macOS: it re-frames the
@@ -1435,20 +1480,31 @@ void CGlobalRendering::SetWindowAttributes(SDL_Window* window)
 	if ((newRes == maxRes) && !fullScreen && !borderless)
 		SDL_MaximizeWindow(window);
 
-	// Desktop-sized borderless ("windowed fullscreen"): Cocoa constrains
-	// normal-level window placement to the visibleFrame, so even after the
-	// size/position calls above the window does not actually cover the
-	// screen. Force the NSWindow frame to the full screen frame (legal for
-	// a borderless styleMask) and auto-hide the menu bar + Dock while the
-	// game is frontmost, so the whole panel belongs to the window and the
-	// cursor pins at every screen edge instead of leaving the window.
-	MacPresent::EnforceBorderlessFullscreenFrame(window, !fullScreen && borderless);
+	// No manual NSWindow reframing: SDL_WINDOW_FULLSCREEN_DESKTOP already covers
+	// the display (menu bar + Dock auto-hidden, cursor pinned at every edge) and
+	// keeps the engine's window-geometry callbacks consistent. The previous
+	// manual setFrame is what fought SDL and produced the oversized/jumping
+	// window; EnforceBorderlessFullscreenFrame is left dormant (never activated).
 #else
 	if (newRes == maxRes)
 		SDL_MaximizeWindow(window);
 #endif
 
 	WindowManagerHelper::SetWindowResizable(window, !borderless && !fullScreen);
+
+#if defined(__APPLE__) && !defined(HEADLESS)
+	// Borderless fullscreen: CONFINE the cursor to the window. Otherwise, with a
+	// second display adjacent to the fullscreen one (e.g. a monitor to the right),
+	// pushing the cursor past that edge crosses ONTO the neighbour — the engine
+	// sees the cursor leave and recentres it, which interrupts edge-scroll on that
+	// edge only (the edges with no neighbour are pinned by the OS and work). The
+	// grab is released automatically on focus loss, so cmd-tab still frees the
+	// cursor; it is re-asserted on focus regain (see SpringApp). Windowed and the
+	// visreg fixed window are never confined.
+	SetWindowInputGrabbing(macWantFullscreen);
+	LOG("[GR::%s][macgrab] cursor confinement want=%d got=%d", __func__,
+	    int(macWantFullscreen), int(GetWindowInputGrabbing()));
+#endif
 }
 
 void CGlobalRendering::ConfigNotify(const std::string& key, const std::string& value)

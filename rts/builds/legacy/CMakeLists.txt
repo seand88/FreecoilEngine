@@ -39,6 +39,24 @@ find_package_static(OpenGL 3.0 REQUIRED)
 # so we don't need libGL at link time at all -- libEGL alone is enough.
 if (APPLE AND SPRING_MAC_LIBEGL)
 	get_filename_component(_MESA_LIB_DIR "${SPRING_MAC_LIBEGL}" DIRECTORY)
+	# Mesa headers (EGL/egl.h, KHR/khrplatform.h, ...) live under the Mesa
+	# prefix next to the lib dir. The macOS present backend includes
+	# <EGL/egl.h>; wire the include dir from the SAME Mesa prefix we link
+	# against rather than relying on a machine-wide (homebrew) EGL, which is not
+	# guaranteed present (local-libs-verify-at-runtime rule). Without this the
+	# build silently used a stale object file and dropped macOS backend edits.
+	get_filename_component(_MESA_PREFIX "${_MESA_LIB_DIR}" DIRECTORY)
+	if (EXISTS "${_MESA_PREFIX}/include/EGL/egl.h")
+		# This target carries its include search paths in the compile FLAGS string
+		# (its target INCLUDES slot is empty), so include_directories()/
+		# target_include_directories() do NOT reach it. Append the Mesa include as
+		# a flag directly, matching how the other third-party includes are wired.
+		string(APPEND CMAKE_CXX_FLAGS " -isystem ${_MESA_PREFIX}/include")
+		string(APPEND CMAKE_OBJCXX_FLAGS " -isystem ${_MESA_PREFIX}/include")
+		message(STATUS "macOS: Mesa headers wired into CXX flags -> ${_MESA_PREFIX}/include")
+	else()
+		message(WARNING "macOS: no EGL/egl.h under ${_MESA_PREFIX}/include — macOS GL backend may fail to compile")
+	endif()
 	if (EXISTS "${_MESA_LIB_DIR}/libGL.dylib")
 		list(APPEND engineLibraries "${_MESA_LIB_DIR}/libGL.dylib")
 		message(STATUS "macOS: linking Mesa libGL at ${_MESA_LIB_DIR}/libGL.dylib")
