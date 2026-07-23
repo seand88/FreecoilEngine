@@ -1021,8 +1021,12 @@ bool DirectPresentFrame(int rdW, int rdH, GLenum readFormat, int lagFrames)
 		    glClientWaitSync(dpFence[old], GL_SYNC_FLUSH_COMMANDS_BIT, 0) == GL_TIMEOUT_EXPIRED) {
 			static uint64_t fenceWaits = 0;
 			++fenceWaits;
+			// L_INFO, not L_WARNING: this fires whenever the GPU render can't keep
+			// the frame budget (a normal perf symptom on a heavy scene, not an
+			// error). At L_WARNING it spammed the on-screen console; keep it in the
+			// log (rate-limited to powers of two) for perf diagnosis only.
 			if ((fenceWaits & (fenceWaits - 1)) == 0) // log 1,2,4,8,...
-				LOG_L(L_WARNING, "[MacPresent] lag-%d pack fence not signaled — waiting (GPU behind, x%llu)",
+				LOG_L(L_INFO, "[MacPresent] lag-%d pack fence not signaled — waiting (GPU behind, x%llu)",
 				        lagFrames, (unsigned long long)fenceWaits);
 			if (glClientWaitSync(dpFence[old], GL_SYNC_FLUSH_COMMANDS_BIT, 100000000ull) == GL_TIMEOUT_EXPIRED) {
 				// pathological (>100ms): use the newest COMPLETED older slot
