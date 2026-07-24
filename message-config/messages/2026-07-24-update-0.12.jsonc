@@ -1,0 +1,26 @@
+// LIVE message: update nudge for anyone still on a pre-0.12 build.
+// Targeted `lt 0.12`, so it stops showing by itself the moment a user updates —
+// no follow-up config change needed. Shown on EVERY launch (not suppressible):
+// v0.11 has real defects (wrong content tag, window/fullscreen bugs, no AI),
+// and "Skip Update" is the deliberate escape hatch rather than a checkbox that
+// silences it forever.
+// NB "Download Update" opens the releases page and QUITS — the user is going to
+// install a new copy, so leaving the old one running is pointless; "Skip
+// Update" is the path that plays now.
+{
+  "id": "update-0.12",
+  "date": "2026-07-24",
+  "target": { "op": "lt", "version": "0.12" },
+  "title": "Update Available",
+  "body": [
+    "<p style='font-family:-apple-system;font-size:13px'>",
+    "Recoil Engine for macOS has a new version available with critical fixes ",
+    "for BAR players.",
+    "</p>"
+  ],
+  "frequency": "always",
+  "buttons": [
+    { "label": "Download Update", "action": "open-url", "url": "https://github.com/benbreen/RecoilEngine-AppleSilicon/releases/latest", "then": "quit", "default": true },
+    { "label": "Skip Update", "action": "continue" }
+  ]
+}

@@ -39,6 +39,35 @@
           "default": true
         }
       ]
+    },
+    {
+      "id": "update-0.12",
+      "date": "2026-07-24",
+      "target": {
+        "op": "lt",
+        "version": "0.12"
+      },
+      "title": "Update Available",
+      "body": [
+        "<p style='font-family:-apple-system;font-size:13px'>",
+        "Recoil Engine for macOS has a new version available with critical fixes ",
+        "for BAR players.",
+        "</p>"
+      ],
+      "frequency": "always",
+      "buttons": [
+        {
+          "label": "Download Update",
+          "action": "open-url",
+          "url": "https://github.com/benbreen/RecoilEngine-AppleSilicon/releases/latest",
+          "then": "quit",
+          "default": true
+        },
+        {
+          "label": "Skip Update",
+          "action": "continue"
+        }
+      ]
     }
   ]
 }
