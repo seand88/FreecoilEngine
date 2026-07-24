@@ -1,0 +1,29 @@
+From 41ca78652400293579146d05459f567b37800e00 Mon Sep 17 00:00:00 2001
+From: benbreen <8338320+benbreen@users.noreply.github.com>
+Date: Wed, 22 Jul 2026 21:00:41 +0100
+Subject: [PATCH 01/11] poly: barrier after reading shared scratch out_ptr in
+ unroll
+
+Add a second CLK_LOCAL_MEM_FENCE so all lanes finish reading out_ptr before the restart-search reduction reuses the same scratch memory; without it a fast lane clobbers scratch and a slow lane stores indices through a garbage pointer (wild heap write -> garbage geometry / giant triangle).
+---
+ src/poly/cl/restart.h | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/poly/cl/restart.h b/src/poly/cl/restart.h
+index 995720da..b99938d1 100644
+--- a/src/poly/cl/restart.h
++++ b/src/poly/cl/restart.h
+@@ -191,6 +191,13 @@ poly_unroll_geometry(global uint32_t *out_draw,
+    if (get_num_sub_groups() > 1) {
+       barrier(CLK_LOCAL_MEM_FENCE);
+       out_ptr = *(uintptr_t *)scratch;
++      /* All lanes must finish reading out_ptr before the restart-search
++       * reduction below reuses the SAME scratch memory: without this barrier a
++       * fast lane can clobber scratch while a slow lane has not yet read it,
++       * and the slow lane then stores indices through a garbage pointer —
++       * a rare, scheduling-dependent wild write corrupting unrelated heap
++       * allocations (manifested as garbage geometry/giant triangles). */
++      barrier(CLK_LOCAL_MEM_FENCE);
+    } else {
+       out_ptr = sub_group_broadcast(out_ptr, 0);
+    }

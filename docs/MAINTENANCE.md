@@ -67,11 +67,12 @@ README "Building the macOS app". Long, GPU-, and content-dependent validation
 is opt-in so build machines can package — mirrors upstream Recoil CI, where
 the build workflow builds and a separate workflow validates.
 
-**Every GitHub release's notes MUST start with
-`packaging/release-notes-header.md` verbatim** — the persistent caution block
-(unofficial port, third-party content downloaded at the user's own risk). It
-mirrors the first-run consent dialog and the README caution; if one changes,
-change all three.
+**Release-notes caution block: RETIRED as a rule (2026-07-24).** Release notes
+no longer have to start with `packaging/release-notes-header.md` — v0.12 ships
+without it, since the same caution is carried by the README and the first-run
+consent dialog, where a player actually meets it. The file is kept for reuse,
+but nothing requires it. The consent dialog and the README caution DO still
+have to agree with each other: if one changes, change the other.
 
 **Every release must also review `message-config/messages/`.** Live messages
 are fetched by every existing install and are version-targeted; a release that

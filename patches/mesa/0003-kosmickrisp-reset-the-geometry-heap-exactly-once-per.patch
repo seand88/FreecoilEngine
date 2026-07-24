@@ -1,0 +1,75 @@
+From d98f257b2af7f7a7b6acfcc656e97ac8c2239c34 Mon Sep 17 00:00:00 2001
+From: benbreen <8338320+benbreen@users.noreply.github.com>
+Date: Wed, 22 Jul 2026 21:00:41 +0100
+Subject: [PATCH 03/11] kosmickrisp: reset the geometry heap exactly once per
+ command buffer
+
+Do not clear cmd->uses_heap in kk_cmd_buffer_dirty_all_gfx (runs on mid-cmdbuf renderpass restarts) and encode the heap reset as the first pre_gfx dispatch with a barrier before subsequent unrolls, so a second reset cannot reallocate from offset 0 and overwrite the first draw's unrolled indices (giant-triangle artifact).
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h | 14 ++++++++++----
+ src/kosmickrisp/vulkan/kk_cmd_draw.c   | 24 ++++++++++++++++++++----
+ 2 files changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index 967c1b67..a3bfbaac 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -266,10 +266,16 @@ kk_cmd_buffer_dirty_all_gfx(struct kk_cmd_buffer *cmd)
+    cmd->state.gfx.dirty = ~0u;
+    cmd->state.gfx.descriptors.root_dirty = true;
+ 
+-   /* We just flushed out the heap use. If we want to use it again, we'll need
+-    * to queue a free for it again.
+-    */
+-   cmd->uses_heap = false;
++   /* NOTE: do NOT clear cmd->uses_heap here. This function runs on mid-command-
++    * buffer render pass restarts (e.g. around meta blits such as font-atlas
++    * uploads). Clearing the flag made kk_heap() encode a SECOND heap reset
++    * (bottom=0) into the same command buffer; since all geometry-unroll compute
++    * runs in the pre-gfx encoder before any render pass executes, the second
++    * unroll then reallocated from offset 0 and OVERWROTE the first draw's
++    * unrolled indices before they were consumed — rendering garbage geometry
++    * (giant-triangle artifact). The heap must be reset exactly once per
++    * command buffer execution; uses_heap is cleared in
++    * kk_cmd_release_resources() when the command buffer is recycled. */
+ }
+ 
+ void kk_cmd_release_dynamic_ds_state(struct kk_cmd_buffer *cmd);
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index cd0bc857..deb51cf2 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -967,13 +967,29 @@ kk_heap(struct kk_cmd_buffer *cmd)
+ 
+    util_call_once_data(&dev->heap_init_once, kk_init_heap, cmd);
+ 
+-   /* We need to free all allocations after each command buffer execution */
++   /* We need to free all allocations after each command buffer execution.
++    *
++    * The reset must be ordered BEFORE every unroll dispatch that bumps the
++    * heap allocator. Deferring it through the main-queue imm-write list
++    * (kk_cmd_write) executes it at the next encoder boundary — after the
++    * first pre_gfx unroll batch already allocated — so heap offsets collide
++    * across passes/frames and draws consume overwritten or stale index data.
++    * Encode it as the first dispatch of the pre_gfx encoder instead, with a
++    * barrier before subsequent unrolls. */
+    if (!cmd->uses_heap) {
+       uint64_t addr = dev->heap->gpu;
+ 
+-      /* Zeroing the allocated index frees everything */
+-      kk_cmd_write(cmd, (struct libkk_imm_write){
+-                           addr + offsetof(struct poly_heap, bottom), 0});
++      struct libkk_imm_write reset = {
++         .address = addr + offsetof(struct poly_heap, bottom),
++         .value = 0,
++      };
++      struct kk_ptr reset_gpu =
++         kk_pool_upload(cmd, &reset, sizeof(reset), sizeof(reset));
++      if (reset_gpu.gpu) {
++         libkk_write_u32_array(cmd, kk_grid_1d(1), true, reset_gpu.gpu);
++         mtl_memory_barrier_with_scope(kk_encoder_pre_gfx_encoder(cmd),
++                                       MTL_BARRIER_SCOPE_BUFFERS);
++      }
+ 
+       cmd->uses_heap = true;
+    }

@@ -34,6 +34,38 @@ OSA
 
 mkdir -p "$WRITEDIR"
 chmod 700 "$WRITEDIR"
+if [ ! -d "$WRITEDIR" ] || [ ! -w "$WRITEDIR" ]; then
+  # Without a writable data dir NOTHING downstream can work (settings, logs,
+  # content, engine write dir) — fail here with a clear reason instead of a
+  # cascade of confusing errors later.
+  fail_dialog "Beyond All Reason could not create its data folder:
+
+$WRITEDIR
+
+Check that your disk is not full and that this folder is not locked, then try again."
+  exit 1
+fi
+# Single-instance lock on the shared write dir. Finder enforces one instance
+# PER BUNDLE, but two copies of the app (e.g. a stale install plus a new one)
+# share this write dir — two concurrent pr-downloaders would race the same
+# pool .tmp paths and can rename a corrupt file into the pool. mkdir is the
+# atomic primitive; a dead owner (crash, force-quit) is detected by pid
+# liveness and the lock reclaimed. Held for our whole lifetime — the exec'd
+# engine keeps our pid, so a second launch while playing is also refused.
+LOCK="$WRITEDIR/.launcher-lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  OLDPID=$(cat "$LOCK/pid" 2>/dev/null)
+  if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
+    fail_dialog "Beyond All Reason is already running or updating. If you cannot find its window, wait a few seconds and try again."
+    exit 0
+  fi
+  rm -rf "$LOCK"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    fail_dialog "Beyond All Reason could not claim its data folder (another copy may be starting). Please try again."
+    exit 0
+  fi
+fi
+echo $$ > "$LOCK/pid"
 # content pool is re-downloadable — keep it out of Time Machine backups.
 # Fire-and-forget: tmutil talks to backupd and can block (stuck daemon /
 # permissions); this exclusion is cosmetic and must never delay launch.
@@ -85,6 +117,19 @@ if ! grep -q "^Fullscreen " "$CFG" 2>/dev/null; then
   } >> "$CFG"
 fi
 
+# Sim/draw balance: the engine defaults (MinDrawFPS=2, MinSimDrawBalance=0.15)
+# let rendering starve to 2 fps during sim catch-up bursts, which players see
+# as ~1s "freezes"/pause-flicker in big battles on Apple-class sim times
+# (issue #5). Tuned values eliminated all >100ms battle-window draw gaps in an
+# interleaved n=4 A/B (DEVLOG 2026-07-21) at the cost of slightly slower sim
+# catch-up. Seeded only when absent so user choices always win.
+if ! grep -q "^MinDrawFPS " "$CFG" 2>/dev/null; then
+  echo "MinDrawFPS = 10" >> "$CFG"
+fi
+if ! grep -q "^MinSimDrawBalance " "$CFG" 2>/dev/null; then
+  echo "MinSimDrawBalance = 0.25" >> "$CFG"
+fi
+
 # Window branding: BAR + engine version instead of the engine's default
 # ("Recoil <version>"). Refreshed each run — it is launcher-owned, not a
 # user setting ({version} is expanded by the engine at startup).
@@ -123,7 +168,16 @@ fi
 # The SUCCESS SENTINEL distinguishes first run (failure is fatal — nothing to
 # play) from later launches (failure is soft — play offline on existing
 # content). BAR_SKIP_CONTENT_CHECK=1 skips entirely (harness/testing).
+# The sentinel RECORDS WHICH content set was installed (a digest of
+# Resources/content_tags): "a check once succeeded" is not the same claim as
+# "the content this build needs is on disk". v0.11 wrote an empty sentinel
+# after fetching the dummy byar:stable package, so on a v0.11 install the
+# first REAL game download (v0.12, byar:test, ~2-3 GB) looked like an update.
 DONE_SENTINEL="$WRITEDIR/.lobby-installed"
+# digest of the tag list download-content.sh installs; changes whenever the
+# required content set does. Missing content_tags => downloader's built-in list.
+CONTENT_SIG="$(shasum "$RES/content_tags" 2>/dev/null | cut -c1-12)"
+CONTENT_SIG="${CONTENT_SIG:-builtin}"
 LOG="$WRITEDIR/first-run-download.log"
 HELPER="$HERE/progress-window"
 
@@ -144,6 +198,20 @@ PORT_VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "
 
 if [ "${BAR_SKIP_CONTENT_CHECK:-0}" != "1" ]; then
   FIRST_RUN=1; [ -f "$DONE_SENTINEL" ] && FIRST_RUN=0
+  # Is skipping this check SAFE — i.e. is there a complete, playable install to
+  # fall back on? Stricter than FIRST_RUN on purpose, and deliberately NOT tied
+  # to it: FIRST_RUN governs whether a download failure is fatal, and a stale
+  # signature must never turn a flaky network into "you cannot launch". It only
+  # gates the Skip button, where being wrong strands the user with no game.
+  #   1. the sentinel names the content set THIS build installs, and
+  #   2. package indexes actually exist on disk (guards a wiped/moved pool).
+  CAN_SKIP=0
+  if [ "$FIRST_RUN" = "0" ] && \
+     [ "$(cat "$DONE_SENTINEL" 2>/dev/null)" = "$CONTENT_SIG" ]; then
+    for _sdp in "$WRITEDIR"/packages/*.sdp; do
+      [ -e "$_sdp" ] && { CAN_SKIP=1; break; }
+    done
+  fi
 
   if [ "${BAR_ASSUME_CONSENT:-0}" != "1" ]; then
     # 1) REMOTE messages (announcements + kill-switch for bad builds).
@@ -181,39 +249,122 @@ I hope online play can be enabled very soon." || true
     fi
   fi
   : > "$LOG"
+  # Ignore SIGPIPE for the whole content-check section: if the user quits the
+  # progress window, OUR OWN final status printfs to the dead fifo would
+  # otherwise kill the launcher (exit 141) right before it starts the engine.
+  # Restored to default just before exec below — the engine must not inherit
+  # an ignored SIGPIPE.
+  trap '' PIPE
   # Show the progress window immediately (fed via a fifo). If the helper is
-  # missing/unrunnable, we degrade gracefully to a headless download + dialog.
-  FIFO=""; HPID=""
+  # missing/unrunnable — or fifo creation fails — we degrade gracefully to a
+  # headless download + dialog rather than dying on a broken redirection.
+  # millisecond clock for the min-display hold below ­— whole-second date(1)
+  # granularity can under-hold by up to a second at the boundary
+  now_ms() { perl -MTime::HiRes=time -e 'printf("%d\n", time()*1000)' 2>/dev/null \
+             || echo $(( $(date +%s) * 1000 )); }
+  FIFO=""; FIFODIR=""; HPID=""; SKIP_FLAG=""; T_WINDOW=$(now_ms)
   if [ -x "$HELPER" ]; then
-    FIFO=$(mktemp -u)/pw.fifo; mkdir -p "$(dirname "$FIFO")"; mkfifo "$FIFO"
-    "$HELPER" < "$FIFO" & HPID=$!
-    exec 4>"$FIFO"   # keep the write end open for the whole download
-    if [ "$FIRST_RUN" = "1" ]; then
-      printf 'S %s\n' "Preparing Beyond All Reason (first run)…" >&4
-    else
-      printf 'S %s\n' "Checking for updates…" >&4
+    FIFODIR=$(mktemp -d 2>/dev/null || true)
+    if [ -n "$FIFODIR" ] && mkfifo "$FIFODIR/pw.fifo" 2>/dev/null; then
+      FIFO="$FIFODIR/pw.fifo"
+      # Skip button: only when there is something playable to fall back to.
+      # The window touches this file when clicked; the poll loop below acts.
+      [ "$CAN_SKIP" = "1" ] && SKIP_FLAG="$FIFODIR/skip-requested"
+      # Double-fork: the helper is reparented to launchd, NOT kept as our
+      # child. The success path deliberately does not wait for it (the window
+      # enforces a minimum on-screen time and must out-live our exec of the
+      # engine without leaving a zombie under it).
+      # REDIRECTION ORDER MATTERS: >/dev/null must come FIRST. Redirections
+      # apply left-to-right, and opening the fifo for reading blocks until we
+      # open the write end below — if the helper still held the command-
+      # substitution pipe while blocked there, this line could never finish
+      # and the launcher would deadlock before showing anything.
+      if [ -n "$SKIP_FLAG" ]; then
+        HPID=$( ( "$HELPER" --skip-file "$SKIP_FLAG" >/dev/null 2>&1 < "$FIFO" & echo $! ) )
+      else
+        HPID=$( ( "$HELPER" >/dev/null 2>&1 < "$FIFO" & echo $! ) )
+      fi
+      exec 4>"$FIFO"   # keep the write end open for the whole download
+      if [ "$FIRST_RUN" = "1" ]; then
+        printf 'S %s\n' "Preparing Beyond All Reason (first run)…" >&4
+      else
+        printf 'S %s\n' "Checking for updates…" >&4
+      fi
     fi
   fi
+  # single cleanup point for the fifo + its temp dir (unlinking an open fifo
+  # is safe — the helper keeps its file descriptor)
+  cleanup_fifo() { [ -n "$FIFODIR" ] && rm -rf "$FIFODIR" 2>/dev/null; FIFO=""; FIFODIR=""; }
 
-  # Run the downloader in the FOREGROUND (so $? is its real exit code — a
-  # `while read < <(cmd)` loop cannot recover cmd's status on macOS bash 3.2)
-  # and stream its @-protocol through a fifo to a background forwarder that
-  # drives the window; everything is tee'd to the log for debugging.
-  SFIFO="$(mktemp -u).status"; mkfifo "$SFIFO"
-  ( while IFS= read -r line; do
-      printf '%s\n' "$line" >> "$LOG"
-      case "$line" in
-        @S\ *) [ -n "$HPID" ] && printf 'S %s\n' "${line#@S }" >&4 ;;
-        @D\ *) [ -n "$HPID" ] && printf 'D %s\n' "${line#@D }" >&4 ;;
-        @P\ *) [ -n "$HPID" ] && printf 'P %s\n' "${line#@P }" >&4 ;;
-        @I)    [ -n "$HPID" ] && printf 'I\n' >&4 ;;
-      esac
-    done < "$SFIFO" ) & FWD_PID=$!
+  # ---- update integrity snapshot ------------------------------------------
+  # The engine resolves rapid:// tags from WRITEDIR/rapid/**/versions.gz
+  # (RapidHandler.cpp), and pr-downloader refreshes that metadata during the
+  # RESOLVE phase — before the actual archive download. A half-finished update
+  # (train wifi, skip button, crash) therefore leaves the tag pointing at a
+  # package that is not on disk, breaking a previously-working install even
+  # though the old files are all still present (pool/packages are append-only,
+  # nothing is ever overwritten). Snapshot the metadata before the check and
+  # restore it on ANY non-success — the old version then prevails exactly.
+  RAPID_DIR="$WRITEDIR/rapid"; RAPID_BAK="$WRITEDIR/rapid.pre-update"
+  restore_rapid() {
+    if [ -d "$RAPID_BAK" ]; then
+      rm -rf "$RAPID_DIR"; mv "$RAPID_BAK" "$RAPID_DIR" 2>/dev/null
+      printf 'rapid metadata restored — pre-update version prevails\n' >> "$LOG"
+    fi
+  }
+  # a leftover backup means the previous update was interrupted mid-write
+  # (crash/force-quit): roll back FIRST so this run starts from a good state
+  restore_rapid
+  [ -d "$RAPID_DIR" ] && { rm -rf "$RAPID_BAK"; cp -R "$RAPID_DIR" "$RAPID_BAK" 2>/dev/null; }
 
-  PRD="$HERE/pr-downloader" "$RES/download-content.sh" --writedir "$WRITEDIR" \
-      > "$SFIFO" 2>>"$LOG"
-  RC=$?
-  wait "$FWD_PID" 2>/dev/null; rm -f "$SFIFO"
+  # Run the downloader in the BACKGROUND and poll it, so a Skip click can
+  # interrupt it mid-download (`wait <pid>` still recovers its real exit
+  # code on macOS bash 3.2). Its @-protocol streams through a fifo to a
+  # background forwarder that drives the window; everything lands in the log.
+  SKIPPED=0
+  poll_downloader() { # sets RC; kills the downloader tree if Skip is clicked
+    local dl_pid=$1
+    while kill -0 "$dl_pid" 2>/dev/null; do
+      if [ -n "$SKIP_FLAG" ] && [ -f "$SKIP_FLAG" ]; then
+        SKIPPED=1
+        printf 'user clicked Skip — stopping the update\n' >> "$LOG"
+        pkill -P "$dl_pid" 2>/dev/null   # pr-downloader + pipeline helpers
+        kill "$dl_pid" 2>/dev/null
+        break
+      fi
+      sleep 0.25
+    done
+    wait "$dl_pid" 2>/dev/null; RC=$?
+  }
+  SFIFO="$(mktemp -u).status"
+  if mkfifo "$SFIFO" 2>/dev/null; then
+    # trap '' PIPE: if the progress helper dies (user quits it, crash), a
+    # bare printf >&4 would take SIGPIPE and kill this forwarder — and the
+    # downloader would then block forever on a full fifo with no UI at all.
+    # The forwarder must keep draining $SFIFO no matter what happens to the
+    # window; failed writes to fd 4 are simply discarded.
+    ( trap '' PIPE
+      while IFS= read -r line; do
+        printf '%s\n' "$line" >> "$LOG"
+        case "$line" in
+          @S\ *) [ -n "$HPID" ] && printf 'S %s\n' "${line#@S }" >&4 2>/dev/null ;;
+          @D\ *) [ -n "$HPID" ] && printf 'D %s\n' "${line#@D }" >&4 2>/dev/null ;;
+          @P\ *) [ -n "$HPID" ] && printf 'P %s\n' "${line#@P }" >&4 2>/dev/null ;;
+          @I)    [ -n "$HPID" ] && printf 'I\n' >&4 2>/dev/null ;;
+        esac
+      done < "$SFIFO" ) & FWD_PID=$!
+
+    PRD="$HERE/pr-downloader" "$RES/download-content.sh" --writedir "$WRITEDIR" \
+        > "$SFIFO" 2>>"$LOG" & DL_PID=$!
+    poll_downloader "$DL_PID"
+    wait "$FWD_PID" 2>/dev/null; rm -f "$SFIFO"
+  else
+    # No fifo (tmp exhausted?): headless download, everything straight to the
+    # log so @E classification still works; the window (if any) just idles.
+    PRD="$HERE/pr-downloader" "$RES/download-content.sh" --writedir "$WRITEDIR" \
+        >> "$LOG" 2>&1 & DL_PID=$!
+    poll_downloader "$DL_PID"
+  fi
 
   # classified failure (if any) is the last @E: line in the log
   ERR_CODE=""; ERR_TEXT=""
@@ -223,14 +374,46 @@ I hope online play can be enabled very soon." || true
     ERR_TEXT="${ERR_LINE#@E:* }"
   fi
 
-  if [ "$RC" -eq 0 ] && [ -z "$ERR_CODE" ]; then
-    touch "$DONE_SENTINEL"
-    [ -n "$HPID" ] && { exec 4>&-; wait "$HPID" 2>/dev/null; }   # EOF closes window
+  if [ "$SKIPPED" = "1" ]; then
+    # User chose to play NOW (train/plane, half-working wifi): stop cleanly,
+    # roll the tag metadata back — the pre-update version prevails intact.
+    restore_rapid
+    if [ -n "$HPID" ]; then
+      printf 'F %s\n' "Update skipped" >&4 2>/dev/null
+      printf 'D %s\n' "Launching game…" >&4 2>/dev/null
+      exec 4>&-
+    fi
+    cleanup_fifo
+    printf 'update skipped by user — playing existing content; next launch retries\n' >> "$LOG"
+  elif [ "$RC" -eq 0 ] && [ -z "$ERR_CODE" ]; then
+    printf '%s\n' "$CONTENT_SIG" > "$DONE_SENTINEL"   # WHAT is installed, not just THAT
+    rm -rf "$RAPID_BAK"   # update is fully on disk — snapshot no longer needed
+    if [ -n "$HPID" ]; then
+      # Finished state: bar and Skip button disappear, result + launch note.
+      if [ "$FIRST_RUN" = "1" ]; then
+        printf 'F %s\n' "Beyond All Reason is ready" >&4 2>/dev/null
+      else
+        printf 'F %s\n' "Beyond All Reason is up-to-date" >&4 2>/dev/null
+      fi
+      printf 'D %s\n' "Launching game…" >&4 2>/dev/null
+      # The result must be READABLE: hold until the window has been up ≥3s
+      # in total before we proceed into the game (a no-op check finishes in
+      # well under a second — without this the text is an unreadable flash).
+      EL=$(( $(now_ms) - T_WINDOW ))
+      if [ "$EL" -lt 3000 ]; then
+        REM=$(( 3000 - EL ))
+        sleep "$(printf '%d.%03d' $(( REM / 1000 )) $(( REM % 1000 )))"
+      fi
+      exec 4>&-
+    fi
+    cleanup_fifo
   elif [ "$FIRST_RUN" = "1" ]; then
     # First run: nothing playable exists — close the progress window, then show
     # the rich error dialog (same one the engine uses): classified message + a
     # scrollable this-session log to paste.
-    [ -n "$HPID" ] && { exec 4>&-; kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null; }
+    restore_rapid   # roll partial first-run metadata back to a clean slate
+    [ -n "$HPID" ] && { exec 4>&-; kill "$HPID" 2>/dev/null; }
+    cleanup_fifo
     MSG="${ERR_TEXT:-The first-run download failed (code ${RC}).}"
     ERRHELP="$HERE/error-dialog"
     if [ -x "$ERRHELP" ]; then
@@ -240,15 +423,31 @@ I hope online play can be enabled very soon." || true
     fi
     exit 1
   else
-    # Update check failed on an already-working install (offline, CDN hiccup):
-    # play on existing content; the next launch retries. Log, don't block.
-    [ -n "$HPID" ] && { exec 4>&-; kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null; }
+    # Update check failed on an already-working install (offline, CDN hiccup,
+    # half-working train wifi): roll the tag metadata back so the OLD version
+    # loads intact, play on existing content; the next launch retries.
+    restore_rapid
+    [ -n "$HPID" ] && { exec 4>&-; kill "$HPID" 2>/dev/null; }
+    cleanup_fifo
     printf 'update check failed (code %s %s) — continuing on existing content\n' \
       "$RC" "${ERR_CODE:-}" >> "$LOG"
   fi
+  trap - PIPE   # back to default before the engine exec below
 fi
 
+# The engine is the point of the whole exercise — if it is missing or cannot
+# be exec'd the launcher must SAY so, not vanish with a silent exit 127.
+if [ ! -x "$HERE/spring" ]; then
+  fail_dialog "The game engine is missing from the app bundle. The download may have been interrupted — please re-download the game and drag it to Applications again."
+  exit 1
+fi
+# execfail: a failed exec (kernel refused the binary: bad arch, quarantine,
+# corrupt file) returns control here instead of silently killing the shell.
+shopt -s execfail 2>/dev/null || true
 # BAR_INFOLOG lets the engine's error dialog (Platform::MsgBox) attach the
 # full this-session log to any fatal it shows.
 SPRING_DATADIR="$RES" BAR_INFOLOG="$WRITEDIR/infolog.txt" \
+BAR_PORT_VERSION="$PORT_VERSION" \
   exec "$HERE/spring" --write-dir "$WRITEDIR" --menu "$LOBBY_RAPID" "$@"
+fail_dialog "The game engine could not be started (macOS refused to run it). Please re-download the game; if this keeps happening, report it with the log at: $WRITEDIR/first-run-download.log"
+exit 1

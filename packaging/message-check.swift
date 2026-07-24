@@ -26,6 +26,29 @@ func arg(_ n: String) -> String? {
     if let i = a.firstIndex(of: n), i + 1 < a.count { return a[i + 1] }
     return nil
 }
+
+// Centre a window on the ACTIVE screen. Duplicated verbatim in the launcher's
+// other Swift helpers: each is compiled as a standalone single-file binary, so
+// there is nowhere shared to put it (same reason arg() is duplicated).
+//
+// Call it only once the window's SIZE IS FINAL — centring a window that is
+// still going to lay itself out leaves it off-centre by half the growth.
+//
+// NSScreen.main, not NSWindow.center(): center() uses the screen holding most of
+// the window, and an un-positioned window can sit on a display the user is not
+// working on — it would then be centred there. .main is the screen with the
+// active window. The 0.75 factor reproduces center()'s placement (the gap above
+// is a third of the gap below), so dialogs sit where macOS users expect.
+func centerOnActiveScreen(_ w: NSWindow) {
+    guard let vis = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame else {
+        w.center(); return
+    }
+    let f = w.frame
+    let x = vis.minX + (vis.width  - f.width)  / 2
+    let y = vis.minY + (vis.height - f.height) * 0.75
+    w.setFrameOrigin(NSPoint(x: max(vis.minX, x), y: max(vis.minY, y)))
+}
+
 let dryRun = CommandLine.arguments.contains("--dry-run")
 
 // test hook: `message-check --sanitize` reads HTML on stdin, prints the
@@ -386,7 +409,7 @@ final class MessageDialog: NSObject {
         window.setContentSize(content.fittingSize)
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.center()
+        centerOnActiveScreen(window)   // AFTER setContentSize — size before position
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()

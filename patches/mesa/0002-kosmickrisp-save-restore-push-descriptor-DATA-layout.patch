@@ -1,0 +1,52 @@
+From 8cf8442f05119fdeedc3df5161291fbe45090a74 Mon Sep 17 00:00:00 2001
+From: benbreen <8338320+benbreen@users.noreply.github.com>
+Date: Wed, 22 Jul 2026 21:00:41 +0100
+Subject: [PATCH 02/11] kosmickrisp: save/restore push-descriptor DATA+layout
+ across meta ops
+
+The meta op reuses desc->push[0] in place, so preserving only the pointer re-uploads meta's descriptors as the app's (stale UBO addresses -> corrupt transforms). Snapshot and restore the push data and layout in kk_meta_begin/kk_meta_end.
+---
+ src/kosmickrisp/vulkan/kk_cmd_meta.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_meta.c b/src/kosmickrisp/vulkan/kk_cmd_meta.c
+index 2066d0ae..1fde0250 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_meta.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_meta.c
+@@ -83,6 +83,12 @@ struct kk_meta_save {
+    struct kk_conditional_rendering_state cond_render;
+    struct kk_descriptor_set *desc0;
+    struct kk_push_descriptor_set *push_desc0;
++   /* The meta op reuses desc->push[0] IN PLACE for its own descriptors, so the
++    * pointer alone is not enough — the app's push DATA must be preserved too,
++    * else the restore re-uploads meta's descriptors as the app's (stale/wrong
++    * UBO addresses → corrupt transforms on subsequent app draws). */
++   uint8_t push_desc0_data[KK_PUSH_DESCRIPTOR_SET_SIZE];
++   struct kk_descriptor_set_layout *push_desc0_layout;
+    mtl_buffer *vb0_handle;
+    struct kk_addr_range vb0;
+    struct kk_buffer_address desc0_set_addr;
+@@ -128,8 +134,12 @@ kk_meta_begin(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
+ 
+    save->desc0 = desc->sets[0];
+    save->has_push_desc0 = desc->push[0];
+-   if (save->has_push_desc0)
++   if (save->has_push_desc0) {
+       save->push_desc0 = desc->push[0];
++      memcpy(save->push_desc0_data, desc->push[0]->data,
++             sizeof(save->push_desc0_data));
++      save->push_desc0_layout = desc->push[0]->layout;
++   }
+ 
+    static_assert(sizeof(save->push) == sizeof(desc->root.push),
+                  "Size mismatch for push in meta_save");
+@@ -150,6 +160,9 @@ kk_meta_end(struct kk_cmd_buffer *cmd, struct kk_meta_save *save,
+       desc->push_dirty &= ~BITFIELD_BIT(0);
+    } else if (save->has_push_desc0) {
+       desc->push[0] = save->push_desc0;
++      memcpy(desc->push[0]->data, save->push_desc0_data,
++             sizeof(save->push_desc0_data));
++      desc->push[0]->layout = save->push_desc0_layout;
+       desc->push_dirty |= BITFIELD_BIT(0);
+    }
+ 

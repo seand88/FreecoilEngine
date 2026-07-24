@@ -19,6 +19,28 @@ func arg(_ name: String) -> String? {
     return nil
 }
 
+// Centre a window on the ACTIVE screen. Duplicated verbatim in the launcher's
+// other Swift helpers: each is compiled as a standalone single-file binary, so
+// there is nowhere shared to put it (same reason arg() is duplicated).
+//
+// Call it only once the window's SIZE IS FINAL — centring a window that is
+// still going to lay itself out leaves it off-centre by half the growth.
+//
+// NSScreen.main, not NSWindow.center(): center() uses the screen holding most of
+// the window, and an un-positioned window can sit on a display the user is not
+// working on — it would then be centred there. .main is the screen with the
+// active window. The 0.75 factor reproduces center()'s placement (the gap above
+// is a third of the gap below), so dialogs sit where macOS users expect.
+func centerOnActiveScreen(_ w: NSWindow) {
+    guard let vis = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame else {
+        w.center(); return
+    }
+    let f = w.frame
+    let x = vis.minX + (vis.width  - f.width)  / 2
+    let y = vis.minY + (vis.height - f.height) * 0.75
+    w.setFrameOrigin(NSPoint(x: max(vis.minX, x), y: max(vis.minY, y)))
+}
+
 let title = arg("--title") ?? "BAR Launcher"
 var message = arg("--message") ?? ""
 if message.isEmpty {
@@ -40,7 +62,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         win.title = title
-        win.center()
+        centerOnActiveScreen(win)   // fixed contentRect: size is already final
         win.isReleasedWhenClosed = false
         let cv = win.contentView!
 

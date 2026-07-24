@@ -10,15 +10,15 @@
 
 **This project is an unofficial native Apple Silicon port of the
 [Recoil](https://github.com/beyond-all-reason/RecoilEngine) RTS engine** — the
-engine itself now runs macOS with no Rosetta and no virtual machine. It achieves 100% sync match between macOS and officially supported platforms such as Windows. This means games (such as BAR) can now run natively on macOS. It contains a series of fixes to make sure the behaviour of the game on Apple Silicon matches exactly that of other platforms, plus a series of Apple specific performance improvements.
+engine itself now runs macOS with no Rosetta and no virtual machine. It achieves <u>100% sync match</u> between macOS and officially supported platforms such as Windows. This means games (such as BAR) can now run natively on macOS. It contains a series of fixes to make sure the behaviour of the game on Apple Silicon matches exactly that of other platforms, plus a series of Apple specific performance improvements.
 
 > [!IMPORTANT]
 > If you run into issues, please report them [here](https://github.com/benbreen/RecoilEngine-AppleSilicon/issues) — **not** in the official Beyond All Reason or Recoil channels. They can't help with problems caused by this port.
 
-> ⚡️ **A Claude Fable port.** The macOS layer in this repository was built
-> largely by **[Claude Fable](https://www.anthropic.com)** (Anthropic's Claude
-> model) — see
-> [How Recoil was Enhanced for Apple Silicon](#how-recoil-was-enhanced-for-apple-silicon).
+⚡️ **A Claude Fable port.** The macOS layer in this repository was built
+largely by **[Claude Fable](https://www.anthropic.com)** (Anthropic's Claude
+model) — see
+[How Recoil was Enhanced for Apple Silicon](#how-recoil-was-enhanced-for-apple-silicon).
 
 ## Downloading
 For convenience, releases also include an **optional BAR launcher package**: a
@@ -32,6 +32,10 @@ from its official online location and configures the engine to play it.
 | `BAR-macos-<ver>.dmg` | **If you want to play BAR on macOS** — the engine plus a BAR launcher: a drag-to-install app that (after an explicit consent prompt) downloads Beyond All Reason from BAR's official content network, keeps it updated, and launches straight into its lobby. | Players who want to play BAR on a Mac. |
 | `Recoil-macos-<engine>-port<ver>.zip` | **The project itself** — the engine port: signed, notarized `spring`, `spring-headless`, and `pr-downloader` with the bundled Metal driver stack. No game content or configuration. | Any Recoil/Spring game community, tooling, or anyone building their own game launcher on top. |
 
+<p align="center">
+  <a href="https://github.com/benbreen/RecoilEngine-AppleSilicon/releases/latest"><b>⬇&nbsp; Download for macOS (Apple Silicon)</b></a>
+  &nbsp;·&nbsp; engine port + optional BAR launcher &nbsp;·&nbsp; macOS 26+
+</p>
 
 > [!CAUTION]
 > **Unofficial project — third-party game content.** This is an independent
@@ -46,20 +50,7 @@ from its official online location and configures the engine to play it.
 > possibly including other components in future.
 > That code and content is not hosted, vetted, or endorsed by this project's
 > maintainer, who accepts no responsibility for it or for any damage it may
-> cause — install and play **AT YOUR OWN RISK**. Downloads use HTTPS and
-> content-hash verification (integrity in transit, not a vetting of the
-> content). If you believe game content is malicious, report it to the
-> [BAR project](https://github.com/beyond-all-reason/Beyond-All-Reason);
-> report problems with this port **here**, not to them.
-
-
-
-<p>&nbsp;</p>
-
-<p align="center">
-  <a href="https://github.com/benbreen/RecoilEngine-AppleSilicon/releases/latest"><b>⬇&nbsp; Download for macOS (Apple Silicon)</b></a>
-  &nbsp;·&nbsp; engine port + optional BAR launcher &nbsp;·&nbsp; macOS 26+
-</p>
+> cause — install and play **AT YOUR OWN RISK**.
 
 ## What is Recoil?
 
@@ -83,13 +74,11 @@ The macOS *foundation* — the first working Apple Silicon builds, the
 surfaceless-EGL → Zink graphics path, and the ARM64 deterministic-math
 groundwork now
 [merged into the official engine](https://github.com/beyond-all-reason/RecoilEngine/pull/2819)
-— comes from [ExaDev's macOS fork](https://github.com/ExaDev/RecoilEngine), whose
-commits keep their authorship here (full [Credits](#credits) below).
 
-That foundation ran the game on a Mac, but it did **not** yet produce a
+Previous efforts to port to macOS did **not** yet produce a
 *compliant* engine — one that can join public multiplayer without desyncing.
 BAR is lockstep-deterministic: every client recomputes the entire simulation
-and must get **bit-identical** results, and an Apple Silicon client still
+and must get **bit-identical** results, previous Apple Silicon clients still
 diverged from the x86 fleet in three ways:
 
 1. **A different math library.** Apple's libm returns per-ULP-different
@@ -104,8 +93,8 @@ diverged from the x86 fleet in three ways:
    is a 1-ULP, game-ending divergence.
 
 This repository is the layer that closed those gaps and **proved** the result,
-developed largely by **Claude Fable** (Anthropic's Claude model) with direction
-from the maintainer — not a thin wrapper:
+(developed largely by **Claude Fable**) with direction
+from the maintainer:
 
 - **Bit-exact cross-architecture simulation** — the core of the port: the
   glibc dbl-64 libm compiled in for fleet-parity `double` math (guarded by a
@@ -122,13 +111,10 @@ from the maintainer — not a thin wrapper:
   the graphics driver from pinned upstream source, builds the engine, runs the
   determinism gates, and produces the signed, notarized, drag-to-install
   `.app`/`.dmg` — nothing fetched or built by hand ([details below](#building-the-macos-app)).
-- **A month-one performance campaign** taking heavy late-game scenes from
+- **Native optimisation** taking heavy late-game scenes from
   single-digit frame rates to display-class ones at 5K, pixel-identical (table
   below).
-- **Native-Mac behaviour** — correct window title, Cmd-based clipboard, a Cmd+Q
-  guard so a reflex keystroke can't abandon a live match, Local-Network
-  permission handling, and loud failure instead of a silent slow software
-  fallback.
+- **Native-Mac behaviour** — correct windowing and full-screen behavior, keyboard layour, a Cmd+Q guard so a reflex keystroke can't abandon a live match, Local-Network permission handling, and loud failure instead of a silent slow software fallback, full-screen behavior, retina/HiDPI, etc.
 
 Upstream's own engine README is
 [README-upstream.markdown](README-upstream.markdown); this file covers the macOS
@@ -177,11 +163,9 @@ build.
 
 ## Requirements
 
-- Apple Silicon Mac (developed/benchmarked on M2 Ultra; the graphics work
-  targets Apple's TBDR GPUs generally).
-- macOS 26+ (KosmicKrisp needs Metal 4).
-- Game content downloads from the official BAR content network on first run
-  (not bundled; served by the BAR project's infrastructure).
+- Apple Silicon Mac so far tested on M2 and above.
+- macOS 26+.
+- Internet connection - Game content downloads from the official BAR content network on first run
 
 ## Known limitations (honest ones)
 

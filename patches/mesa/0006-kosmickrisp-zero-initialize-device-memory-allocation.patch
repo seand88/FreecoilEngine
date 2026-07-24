@@ -1,0 +1,40 @@
+From 872aee2df346d74fa5a7a4721e6426f8049e0fe2 Mon Sep 17 00:00:00 2001
+From: benbreen <8338320+benbreen@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 21:35:03 +0100
+Subject: [PATCH 06/11] kosmickrisp: zero-initialize device memory allocations
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fresh MTLHeap storage is recycled VRAM with undefined contents; drivers on
+other platforms effectively hand out zeroed kernel pages, so GL apps that
+(incorrectly but harmlessly) sample never-rendered FBO textures see
+transparent black there but psychedelic garbage here — e.g. BAR's
+AdvPlayersList after resign and its unit-info overlay (port issue #6).
+Unified memory makes the fix a one-time CPU memset through the
+heap-spanning buffer at allocation, before any resource can alias the heap.
+
+---
+ src/kosmickrisp/vulkan/kk_bo.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_bo.c b/src/kosmickrisp/vulkan/kk_bo.c
+index 69263269..ed56a7a1 100644
+--- a/src/kosmickrisp/vulkan/kk_bo.c
++++ b/src/kosmickrisp/vulkan/kk_bo.c
+@@ -58,6 +58,15 @@ kk_alloc_bo(struct kk_device *dev, struct vk_object_base *log_obj,
+    bo->gpu = mtl_buffer_get_gpu_address(map);
+    bo->cpu = mtl_get_contents(map);
+ 
++   /* Fresh MTLHeap storage is recycled VRAM with undefined contents. Zero it
++    * (unified memory: plain CPU memset through the heap-spanning buffer, once
++    * per allocation, before any resource can reference the heap) so
++    * never-rendered resources — e.g. an FBO texture whose render pass failed
++    * or has not run yet — read back as transparent black, matching drivers
++    * that hand out zeroed pages, instead of leftover-VRAM garbage. */
++   if (bo->cpu != NULL)
++      memset(bo->cpu, 0, size_B);
++
+    kk_device_add_heap_to_residency_set(dev, handle);
+ 
+    *bo_out = bo;

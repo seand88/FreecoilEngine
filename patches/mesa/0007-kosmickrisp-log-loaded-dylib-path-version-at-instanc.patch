@@ -1,8 +1,8 @@
-From c6724377a51a447b806b56344fae0d603e806cc7 Mon Sep 17 00:00:00 2001
+From b3d1465fdda4fed257fbf4d40872f14fb19815fb Mon Sep 17 00:00:00 2001
 From: benbreen <8338320+benbreen@users.noreply.github.com>
 Date: Fri, 10 Jul 2026 22:25:39 +0100
-Subject: [PATCH 1/4] kosmickrisp: log loaded dylib path + version at instance
- creation
+Subject: [PATCH 07/11] kosmickrisp: log loaded dylib path + version at
+ instance creation
 
 Downstream-only patch (not proposed upstream). This driver is distributed
 project-locally and loaded via VK_ICD_FILENAMES / DYLD_* env vars, so a
@@ -50,6 +50,3 @@ index 90abd528..677bf404 100644
     *pInstance = kk_instance_to_handle(instance);
     return VK_SUCCESS;
  
--- 
-2.50.1 (Apple Git-155)
-

@@ -1,0 +1,39 @@
+From: BAR macOS port
+Subject: [PATCH] zink: enable renderpass tracking/optimization for KosmicKrisp
+
+*** STATUS: SHIPPED in v0.12 (moved from patches/mesa-candidates/ on 2026-07-23
+*** per user decision). Certified before inclusion: long1 Air A/B +4.8% (fresh
+*** interleaved n=3/arm, clean separation, every rp run > every control run) /
+*** ~+5.6% aggregate with the earlier n=3; determinism BIT-EXACT (fixed-seed
+*** DumpState, 0-diff 94802-line sim dump); testcard contamination 0. Applies
+*** clean as patch 0013 of the 12+1 series on pinned mesa 8f272b1fe1.
+
+KosmicKrisp is a tile-based (TBDR) Vulkan driver on Apple GPUs, exactly
+like Honeykrisp and the other tilers already listed in zink's
+"these drivers benefit from renderpass optimization" switch. It was the
+only tile-based driver omitted, so zink left renderpass tracking OFF for
+it by default.
+
+With tracking off, zink cannot coalesce the load/store actions of
+adjacent color-only and color+depth passes, so each frame incurs extra
+full-resolution tile load/store round-trips (each a full tile
+store+reload on a TBDR GPU). Adding KOSMICKRISP to the list merges those
+passes (measured on M2: ~20 -> ~11.5 render-encoder round-trips/frame,
+submits 44 -> 28/s), ~5% less GPU time per frame, with byte-identical
+output (this is the same code path already validated on Honeykrisp and
+turnip, and is exactly what ZINK_DEBUG=rp toggles).
+
+Render-only change: it does not touch the synchronized simulation, so it
+is determinism-neutral (verified bit-exact via DumpState).
+
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -3086,6 +3086,7 @@ init_driver_workarounds(struct zink_screen *screen)
+    case VK_DRIVER_ID_BROADCOM_PROPRIETARY:
+    case VK_DRIVER_ID_ARM_PROPRIETARY:
+    case VK_DRIVER_ID_MESA_HONEYKRISP:
++   case VK_DRIVER_ID_MESA_KOSMICKRISP:
+       screen->driver_workarounds.track_renderpasses = true; //screen->info.primgen_feats.primitivesGeneratedQueryWithRasterizerDiscard
+       break;
+    default:

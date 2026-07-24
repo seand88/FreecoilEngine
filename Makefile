@@ -69,6 +69,7 @@ engine:
 test:
 	packaging/test/message-check-test.sh
 	packaging/test/launcher-test.sh
+	packaging/test/dialog-center-test.sh   # shows real windows; skips without a screen
 
 clean-artifacts:
 	rm -rf "release-artifacts/BAR Launcher.app" release-artifacts/*.zip release-artifacts/*.dmg

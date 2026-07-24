@@ -70,17 +70,24 @@ ENABLE_ONLINE="${BAR_ONLINE:-1}"
 MESSAGES_CONFIG="${BAR_MESSAGES_CONFIG:-https://raw.githubusercontent.com/benbreen/RecoilEngine-AppleSilicon/main/message-config/messages.json}"
 
 # Test tiers (mirrors upstream Recoil CI: the *build* workflow only builds +
-# packages; heavier validation is separate/opt-in):
-#   - sync-test (streflop bit-exactness): CPU-only, seconds, no GPU/content —
-#     the cheap determinism guarantee. ON by default; --skip-sync-test drops it
-#     for a truly minimal build box.
-#   - replay smoke (headless full-game re-sim): needs game content + tens of
-#     minutes; this is CERTIFICATION, not a build gate. OFF by default so build
-#     machines can package. Opt in with --certify (or RELEASE_CERTIFY=1).
-# A shipping artifact should be certified: building a SIGNED bundle without
-# certification warns loudly (see below), but does not hard-fail — certify
-# separately with `make certify` when the build box can't.
-RUN_SYNC_TEST=1
+# packages; ALL test stages are OPT-IN as of 2026-07-20 — plain builds stay
+# fast, big changes / release candidates run the tests, either with the build
+# or standalone):
+#   - --with-synctest  streflop bit-exactness (CPU-only, seconds).
+#                      standalone: scripts/run-synctest.sh
+#   - --with-visreg    visual/artifact regression vs baselines (~3 min).
+#                      standalone: scripts/visreg.sh
+#   - --with-perf      adds the m7 perf gate to visreg (~+4 min).
+#                      standalone: scripts/visreg.sh --perf
+#   - --certify        replay smoke (headless full-game re-sim; tens of
+#                      minutes; needs game content). CERTIFICATION, not a
+#                      build gate.
+# A SHIPPING artifact must have passed sync-test + visreg(+perf) + certify —
+# skipped stages warn loudly below but do not hard-fail, so build boxes can
+# package; run the missing stages standalone before publishing.
+RUN_SYNC_TEST=${RELEASE_SYNC_TEST:-0}
+RUN_VISREG=${RELEASE_VISREG:-0}
+RUN_VISREG_PERF=0
 REPLAY_SMOKE=${RELEASE_CERTIFY:-0}
 
 while [ $# -gt 0 ]; do
@@ -101,7 +108,10 @@ while [ $# -gt 0 ]; do
       MESSAGES_CONFIG="file://$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2;;
     --certify|--replay-smoke) REPLAY_SMOKE=1; shift;;
     --skip-replay-smoke) REPLAY_SMOKE=0; shift;;   # now the default; kept for compat
-    --skip-sync-test) RUN_SYNC_TEST=0; shift;;
+    --with-synctest) RUN_SYNC_TEST=1; shift;;
+    --skip-sync-test) RUN_SYNC_TEST=0; shift;;     # now the default; kept for compat
+    --with-visreg) RUN_VISREG=1; shift;;
+    --with-perf) RUN_VISREG=1; RUN_VISREG_PERF=1; shift;;
     *) echo "unknown arg: $1"; exit 2;;
   esac
 done
@@ -159,20 +169,23 @@ echo "port version: $PORTVER (user-facing release number)"
 
 echo "=== [1b/7] streflop cross-arch sync-test (bit-exactness vs committed refs)"
 if [ "$RUN_SYNC_TEST" = "1" ]; then
-  ST_BUILD="$BUILD/synctest"
-  cmake -S "$SRC/tools/sync-test" -B "$ST_BUILD" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 >/dev/null
-  ninja -C "$ST_BUILD" >/dev/null
-  "$ST_BUILD/streflop-float-test" "$ST_BUILD/st_" >/dev/null
-  for ref in streflop_results_NEON_arm64.bin streflop_results_SSE_x86_64.bin; do
-    python3 "$SRC/tools/sync-test/compare_results.py" \
-        "$ST_BUILD"/st_*.bin "$SRC/tools/sync-test/reference/$ref" \
-      | grep -q "RESULT: BIT-EXACT MATCH" \
-      || { echo "FATAL: streflop sync-test diverged from $ref"; exit 1; }
-  done
-  echo "sync-test: BIT-EXACT vs both committed references"
+  ENGINE_SRC="$SRC" "$BAR/scripts/run-synctest.sh" --build-dir "$BUILD/synctest"
 else
-  echo "(skipped by --skip-sync-test)"
+  echo "WARNING: sync-test SKIPPED (opt-in as of 2026-07-20)."
+  echo "         A shipping artifact must have passed it — run with"
+  echo "         --with-synctest or standalone: scripts/run-synctest.sh"
+fi
+
+echo "=== [1c/7] visreg (visual/artifact/perf regression)"
+if [ "$RUN_VISREG" = "1" ]; then
+  VR_ARGS=()
+  [ "$RUN_VISREG_PERF" = "1" ] && VR_ARGS+=(--perf)
+  VISREG_BUILD="$BUILD" VISREG_MESA="$MESA_PREFIX" \
+    "$BAR/scripts/visreg.sh" ${VR_ARGS[@]+"${VR_ARGS[@]}"} \
+    || { echo "FATAL: visreg regression gate failed"; exit 1; }
+else
+  echo "WARNING: visreg SKIPPED (opt-in). Before shipping run with"
+  echo "         --with-visreg [--with-perf] or standalone: scripts/visreg.sh --perf"
 fi
 
 echo "=== [2/7] replay certification (opt-in; --certify / RELEASE_CERTIFY=1)"
@@ -216,6 +229,21 @@ fi
 # base content archives (engine-built sdz)
 mkdir -p "$RESOURCES/base"
 find "$BUILD" -name "*.sdz" -exec cp {} "$RESOURCES/base/" \;
+# native skirmish AIs (issue #1): runtime AI/ tree assembled by
+# build-engine.sh (C interface + BARb + NullAI). Lives in Resources = the
+# engine's read-only datadir, so FetchSkirmishAILibrary finds it.
+[ -d "$BUILD/AI" ] || { echo "FATAL: no AI/ runtime tree in $BUILD (AI_TYPES=NONE build?)"; exit 1; }
+cp -R "$BUILD/AI" "$RESOURCES/AI"
+# Drop the CMake build cruft that cp -R drags in (CMakeFiles/, cmake_install.cmake,
+# Makefile, *.o). The engine never loads it at runtime — it scans the tree for
+# AIInfo.lua + the AI dylib — and it embeds the absolute build path (a
+# leak, e.g. cmake_install.cmake's "Install script for directory: <path>").
+find "$RESOURCES/AI" -name CMakeFiles -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find "$RESOURCES/AI" -type f \( -name '*.cmake' -o -name 'Makefile' -o -name 'CMakeCache.txt' -o -name '*.o' \) -delete 2>/dev/null || true
+for ai in "AI/Interfaces/C/0.1/libAIInterface.dylib" "AI/Skirmish/BARb/stable/libSkirmishAI.dylib" "AI/Skirmish/NullAI/0.1/libSkirmishAI.dylib"; do
+  test -f "$RESOURCES/$ai" || { echo "FATAL: $ai missing from staged AI tree"; exit 1; }
+  file "$RESOURCES/$ai" | grep -q arm64 || { echo "FATAL: $ai not arm64"; exit 1; }
+done
 # base fonts: the engine loads fonts/FreeSansBold.otf as a LOOSE file from a
 # datadir (not from an sdz) — without it the engine aborts at boot with
 # "did you forget to run make install?". Ship the engine's cont/fonts.

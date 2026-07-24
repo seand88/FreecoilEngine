@@ -35,15 +35,43 @@ func barIcon() -> NSImage? {
         .appendingPathComponent("Resources/AppIcon.icns"))
 }
 
+// Centre a window on the ACTIVE screen. Duplicated verbatim in the launcher's
+// other Swift helpers: each is compiled as a standalone single-file binary, so
+// there is nowhere shared to put it (same reason arg() is duplicated).
+//
+// Call it only once the window's SIZE IS FINAL — see the alert.layout() note in
+// present() below.
+//
+// NSScreen.main, not NSWindow.center(): center() uses the screen holding most of
+// the window, and an un-positioned window can sit on a display the user is not
+// working on — it would then be centred there. .main is the screen with the
+// active window. The 0.75 factor reproduces center()'s placement (the gap above
+// is a third of the gap below), so dialogs sit where macOS users expect.
+func centerOnActiveScreen(_ w: NSWindow) {
+    guard let vis = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame else {
+        w.center(); return
+    }
+    let f = w.frame
+    let x = vis.minX + (vis.width  - f.width)  / 2
+    let y = vis.minY + (vis.height - f.height) * 0.75
+    w.setFrameOrigin(NSPoint(x: max(vis.minX, x), y: max(vis.minY, y)))
+}
+
 func present(_ alert: NSAlert) -> NSApplication.ModalResponse {
     if let icon = barIcon() { alert.icon = icon }
+    // SIZE BEFORE POSITION. An NSAlert window is only 260pt wide until it lays
+    // itself out; runModal() does that on show, growing it right/up from a fixed
+    // origin. Centring first therefore left both dialogs ~150pt right of centre
+    // (reported 2026-07-24, measured on a 2560pt display). layout() makes the
+    // size final now, so the centring below is the one the user sees.
+    alert.layout()
     let w = alert.window
     w.level = .floating
     w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    // center BEFORE ordering front: we show the window ahead of runModal (to
+    // position BEFORE ordering front: we show the window ahead of runModal (to
     // beat other apps' focus), so runModal never gets to position it — without
     // this it appears at the frame's default origin (off to the left).
-    w.center()
+    centerOnActiveScreen(w)
     w.makeKeyAndOrderFront(nil)
     w.orderFrontRegardless()
     app.activate(ignoringOtherApps: true)

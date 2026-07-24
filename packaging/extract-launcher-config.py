@@ -7,6 +7,11 @@ Produces, into the output dir:
   chobby_config.json            <- config['json_files']['chobby_config.json']
   default_springsettings.cfg    <- config['default_springsettings'] as Key=Value
                                    (minus keys the Mac launcher owns: display)
+  content_tags                  <- config['setups'][0]['downloads']['games'],
+                                   one rapid tag per line — the packages the
+                                   official launcher installs/updates
+                                   (byar:test + byar-chobby:test; NB byar:stable
+                                   is a stale dummy on the CDN — never use it)
 
 Usage: extract-launcher-config.py <dist_cfg/config.json> <out-dir>
 """
@@ -42,8 +47,20 @@ def main():
                 v = 1 if v else 0
             f.write(f"{k} = {v}\n")
 
+    tags = []
+    for setup in cfg.get("setups", []):
+        for tag in setup.get("downloads", {}).get("games", []):
+            if tag not in tags:
+                tags.append(tag)
+    if not tags:
+        print("FATAL: dist_cfg has no setups[].downloads.games tags", file=sys.stderr)
+        sys.exit(1)
+    with open(os.path.join(out_dir, "content_tags"), "w") as f:
+        f.write("\n".join(tags) + "\n")
+
     print(f"extracted chobby_config.json + {sum(1 for k in ss if k not in OWNED)} "
-          f"default springsettings (excluded {len(OWNED & set(ss))} display keys)")
+          f"default springsettings (excluded {len(OWNED & set(ss))} display keys) "
+          f"+ {len(tags)} content tags ({', '.join(tags)})")
 
 if __name__ == "__main__":
     main()
