@@ -418,6 +418,23 @@ namespace {
 			return 0;
 		}
 
+		// Refuse geometry shaders on drivers that link them but never run them
+		// (see CGlobalRendering::ProbeGeometryShaderStage). Letting the compile
+		// "succeed" there is the worst outcome: the program links, the draw
+		// issues, nothing is rasterized, and no error is reported anywhere, so
+		// the effect just vanishes. Failing here is both honest and useful --
+		// content commonly probes a geometry-shader variant and keeps a
+		// geometry-shader-free one for when the compile fails, and that
+		// fallback is what should be selected on such a driver.
+		if (type == GL_GEOMETRY_SHADER && !globalRendering->supportGeometryShaderStage) {
+			LuaShaders& shaders = CLuaHandle::GetActiveShaders(L);
+			shaders.errorLog = "Geometry shaders are not executable on this driver "
+			                   "(the stage links but does not rasterize); use a "
+			                   "non-geometry-shader code path";
+			success = false;
+			return 0;
+		}
+
 		GLuint obj = glCreateShader(type);
 		if (obj == 0) {
 			LuaShaders& shaders = CLuaHandle::GetActiveShaders(L);

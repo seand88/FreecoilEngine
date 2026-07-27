@@ -207,6 +207,7 @@ CR_REG_METADATA(CGlobalRendering, (
 	CR_IGNORED(supportClipSpaceControl),
 	CR_IGNORED(supportSeamlessCubeMaps),
 	CR_IGNORED(supportFragDepthLayout),
+	CR_IGNORED(supportGeometryShaderStage),
 	CR_IGNORED(haveGL4),
 	CR_IGNORED(glslMaxVaryings),
 	CR_IGNORED(glslMaxAttributes),
@@ -337,6 +338,7 @@ CGlobalRendering::CGlobalRendering()
 	, supportClipSpaceControl(false)
 	, supportSeamlessCubeMaps(false)
 	, supportFragDepthLayout(false)
+	, supportGeometryShaderStage(false)
 	, haveGL4(false)
 
 	, glslMaxVaryings(0)
@@ -906,6 +908,159 @@ void CGlobalRendering::CheckGLExtensions()
 	throw unsupported_error(errMsg);
 }
 
+/**
+ * Does the geometry-shader stage actually rasterize anything?
+ *
+ * A GL >= 3.2 context is supposed to imply a working geometry stage, but that
+ * is only true if the driver's back end has one. A GL-on-Vulkan translation
+ * layer (zink) can be running on a device that does not expose
+ * VkPhysicalDeviceFeatures::geometryShader — every Metal-backed device, for
+ * instance, since Metal has no geometry stage — while the GLSL front end,
+ * which gates geometry shaders on the *context version* alone, keeps compiling
+ * and linking them. glCompileShader and glLinkProgram both report success, no
+ * GL error is raised, and draws using the program silently emit nothing.
+ *
+ * Neither a version check nor an extension check can see that: the legacy
+ * GL_ARB_geometry_shader4 string is absent on drivers that do support the core
+ * stage, and the GS limits (GL_MAX_GEOMETRY_OUTPUT_VERTICES and friends) are
+ * happily reported by drivers that cannot run one. The only reliable question
+ * is the empirical one, so ask it: run a geometry shader once, into a 1x1
+ * off-screen buffer, and look at the pixel.
+ *
+ * Callers use this to fail geometry-shader compilation outright (see
+ * LuaShaders::CompileObject). That converts a silent, invisible-geometry bug
+ * into the ordinary "shader did not compile" path that content already
+ * handles, and which typically selects an equivalent geometry-shader-free
+ * variant.
+ *
+ * Why only the geometry stage is probed and gated: the same silent failure is
+ * possible for any stage, so all of them were measured on the affected stack
+ * (2026-07-27, zink + KosmicKrisp). Tessellation and compute both genuinely
+ * execute there — the driver's claims for those are honest — and geometry was
+ * the only dead one. Gating is also only *safe* where content keeps a
+ * fallback: refusing a geometry shader makes content select its shipped no-GS
+ * path, whereas refusing tessellation or compute would simply remove features
+ * that currently work. So if another stage ever dies, add a probe for it and
+ * prefer a loud warning over a refusal unless a fallback demonstrably exists.
+ *
+ * Cost is one shader compile plus a one-pixel draw, once, at startup.
+ */
+bool CGlobalRendering::ProbeGeometryShaderStage()
+{
+#ifdef HEADLESS
+	return false;
+#else
+	if (!GLAD_GL_VERSION_3_2 || !FBO::IsSupported())
+		return false;
+
+	// The probe deliberately does the transform in the GEOMETRY stage: the
+	// vertex shader emits a degenerate position that would land outside the
+	// clip volume, so a pixel can only be written if the geometry stage really
+	// ran. (This mirrors how content that transforms in its GS behaves — it is
+	// exactly the case that fails invisibly.)
+	const char* vsSrc =
+		"#version 150 compatibility\n"
+		"void main() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }\n";
+	const char* gsSrc =
+		"#version 150 compatibility\n"
+		"layout(points) in;\n"
+		"layout(triangle_strip, max_vertices = 4) out;\n"
+		"void main() {\n"
+		"	gl_Position = vec4(-1.0, -1.0, 0.0, 1.0); EmitVertex();\n"
+		"	gl_Position = vec4( 1.0, -1.0, 0.0, 1.0); EmitVertex();\n"
+		"	gl_Position = vec4(-1.0,  1.0, 0.0, 1.0); EmitVertex();\n"
+		"	gl_Position = vec4( 1.0,  1.0, 0.0, 1.0); EmitVertex();\n"
+		"	EndPrimitive();\n"
+		"}\n";
+	const char* fsSrc =
+		"#version 150 compatibility\n"
+		"out vec4 fragColor;\n"
+		"void main() { fragColor = vec4(1.0); }\n";
+
+	const auto compile = [](GLenum type, const char* src) -> GLuint {
+		const GLuint obj = glCreateShader(type);
+
+		if (obj == 0)
+			return 0;
+
+		glShaderSource(obj, 1, &src, nullptr);
+		glCompileShader(obj);
+
+		GLint status = GL_FALSE;
+		glGetShaderiv(obj, GL_COMPILE_STATUS, &status);
+
+		if (status == GL_TRUE)
+			return obj;
+
+		glDeleteShader(obj);
+		return 0;
+	};
+
+	const GLuint vsObj = compile(GL_VERTEX_SHADER  , vsSrc);
+	const GLuint gsObj = compile(GL_GEOMETRY_SHADER, gsSrc);
+	const GLuint fsObj = compile(GL_FRAGMENT_SHADER, fsSrc);
+
+	bool rasterized = false;
+
+	if (vsObj != 0 && gsObj != 0 && fsObj != 0) {
+		const GLuint prog = glCreateProgram();
+
+		glAttachShader(prog, vsObj);
+		glAttachShader(prog, gsObj);
+		glAttachShader(prog, fsObj);
+		glLinkProgram(prog);
+
+		GLint linked = GL_FALSE;
+		glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+
+		if (linked == GL_TRUE) {
+			GLint prevViewport[4] = {0, 0, 0, 0};
+			GLint prevProgram = 0;
+			glGetIntegerv(GL_VIEWPORT, prevViewport);
+			glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+
+			{
+				FBO fbo;
+				fbo.Bind();
+				fbo.CreateRenderBuffer(GL_COLOR_ATTACHMENT0_EXT, GL_RGBA8, 1, 1);
+
+				if (fbo.GetStatus() == GL_FRAMEBUFFER_COMPLETE_EXT) {
+					glViewport(0, 0, 1, 1);
+					glUseProgram(prog);
+
+					// one point in, one full-viewport quad out (if the stage exists)
+					GLuint vao = 0;
+					glGenVertexArrays(1, &vao);
+					glBindVertexArray(vao);
+					glDrawArrays(GL_POINTS, 0, 1);
+					glBindVertexArray(0);
+					glDeleteVertexArrays(1, &vao);
+
+					uint8_t pixel[4] = {0, 0, 0, 0};
+					glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+					rasterized = (pixel[0] > 127);
+				}
+
+				fbo.Unbind();
+			}
+
+			glUseProgram(static_cast<GLuint>(prevProgram));
+			glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+		}
+
+		glDeleteProgram(prog);
+	}
+
+	// the probe must not leave errors behind for the next caller to trip over
+	glDeleteShader(vsObj);
+	glDeleteShader(gsObj);
+	glDeleteShader(fsObj);
+	glClearErrors("GR", __func__, false);
+
+	return rasterized;
+#endif
+}
+
 void CGlobalRendering::SetGLSupportFlags()
 {
 	const std::string& glVendor = StringToLower(globalRenderingInfo.glVendor);
@@ -1024,6 +1179,16 @@ void CGlobalRendering::SetGLSupportFlags()
 
 	//supportFragDepthLayout = ((globalRenderingInfo.glContextVersion.x * 10 + globalRenderingInfo.glContextVersion.y) >= 42);
 	supportFragDepthLayout = GLAD_GL_ARB_conservative_depth; //stick to the theory that reported = exist
+
+	// the one place where "reported = exist" does NOT hold, so measure it
+	supportGeometryShaderStage = ProbeGeometryShaderStage();
+
+	if (!supportGeometryShaderStage) {
+		LOG_L(L_WARNING,
+			"[GR::%s] this driver links geometry shaders but does not run them; "
+			"geometry-shader compilation will be refused so content falls back to "
+			"its non-GS paths", __func__);
+	}
 
 	//stick to the theory that reported = exist
 	//supportMSAAFrameBuffer &= ((globalRenderingInfo.glContextVersion.x * 10 + globalRenderingInfo.glContextVersion.y) >= 32);
@@ -1153,6 +1318,7 @@ void CGlobalRendering::LogVersionInfo(const char* sdlVersionStr, const char* glV
 	LOG("\tMSAA frame-buffer support : %i (%i)", supportMSAAFrameBuffer, IsExtensionSupported("GL_EXT_framebuffer_multisample"));
 	LOG("\tZ-buffer depth            : %i (-)" , supportDepthBufferBitDepth);
 	LOG("\tprimitive-restart support : %i (%i)", supportRestartPrimitive, IsExtensionSupported("GL_NV_primitive_restart"));
+	LOG("\tgeometry-shader stage     : %i (probed)", supportGeometryShaderStage);
 	LOG("\tclip-space control support: %i (%i)", supportClipSpaceControl, IsExtensionSupported("GL_ARB_clip_control"));
 	LOG("\tseamless cube-map support : %i (%i)", supportSeamlessCubeMaps, IsExtensionSupported("GL_ARB_seamless_cube_map"));
 	LOG("\tfrag-depth layout support : %i (%i)", supportFragDepthLayout, IsExtensionSupported("GL_ARB_conservative_depth"));

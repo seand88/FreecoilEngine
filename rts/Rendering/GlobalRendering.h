@@ -61,6 +61,7 @@ public:
 
 	void CheckGLExtensions();
 	void SetGLSupportFlags();
+	static bool ProbeGeometryShaderStage();
 	void QueryVersionInfo(char (&sdlVersionStr)[64], char (&glVidMemStr)[64]);
 	void QueryGLMaxVals();
 	void LogVersionInfo(const char* sdlVersionStr, const char* glVidMemStr) const;
@@ -329,6 +330,17 @@ public:
 	bool supportClipSpaceControl;
 	bool supportSeamlessCubeMaps;
 	bool supportFragDepthLayout;
+
+	/**
+	 * @brief whether the geometry-shader stage actually rasterizes
+	 *
+	 * Not a version or extension query: some drivers expose a GL >= 3.2
+	 * context (so the GLSL front-end happily compiles and links a geometry
+	 * shader) on top of a device that has no geometry stage at all, and then
+	 * silently draw nothing. Determined once at init by really running a
+	 * geometry shader, see ProbeGeometryShaderStage().
+	 */
+	bool supportGeometryShaderStage;
 
 	/**
 	 * Shader capabilities
