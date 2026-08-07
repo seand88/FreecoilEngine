@@ -8,6 +8,29 @@
 
 // Tell streflop_cond.h not to define math::sqrt(float) - we'll provide a faster one
 #define MATH_SQRT_OVERRIDE 1
+
+// streflop_cond.h's NON-streflop branch defines a macOS-only std::hypot shim
+// that calls math::sqrtf. That is a non-dependent qualified name, so it has to
+// resolve at template-DEFINITION time — i.e. while the include below is being
+// parsed, long before the math namespace at the bottom of this header defines
+// it. In the streflop branch `using namespace streflop` happens to supply the
+// name; in the non-streflop branch nothing does, so any TU compiled without a
+// STREFLOP_* define fails to build on macOS (hit by the sound target, which
+// reaches this header via float3.h).
+//
+// Declare it up front, but ONLY for the branch that is missing it: the
+// condition below mirrors streflop_cond.h's own STREFLOP_ENABLED test, so
+// streflop-enabled (i.e. every synced) TU sees no change to its overload set.
+// That matters here — silently re-resolving a math:: call in synced code from
+// streflop to fastmath would change results and desync. The definition follows
+// at the bottom of this header.
+#if defined(NOT_USING_STREFLOP) || \
+    !(defined(STREFLOP_SSE) || defined(STREFLOP_NEON) || defined(STREFLOP_X87) || defined(STREFLOP_SOFT))
+namespace math {
+	template<typename T> inline float sqrtf(T x);
+}
+#endif
+
 #include "lib/streflop/streflop_cond.h"
 #include "System/MainDefines.h"
 #include "System/MathConstants.h"
