@@ -63,6 +63,37 @@ int        pbufW = 1280;         // pbuffer (default framebuffer) dimensions
 int        pbufH = 720;
 std::vector<unsigned char> presentBuf; // reused glReadPixels staging buffer
 
+// BENCHMARK PIN (perf-test only): SPRING_MAC_PERF_RENDER_SIZE=<W>x<H> forces
+// the render target to a fixed pixel count, independent of window size,
+// backing scale, panel geometry and GPU core count. Parsed once — it is read
+// from BOTH the initial pbuffer sizing and ResizeIfNeeded, which must agree or
+// a stray resize would silently un-pin the benchmark mid-run. Returns false
+// (leaving w/h untouched) when unset or malformed. See the long comment at the
+// CreateContext call site for what each coupling is and why it matters.
+bool PerfPinnedRenderSize(int& w, int& h)
+{
+	static int  s_w = 0, s_h = 0;
+	static bool s_parsed = false;
+	if (!s_parsed) {
+		s_parsed = true;
+		if (const char* rs = getenv("SPRING_MAC_PERF_RENDER_SIZE")) {
+			int rw = 0, rh = 0;
+			if (sscanf(rs, "%dx%d", &rw, &rh) == 2 && rw > 0 && rh > 0) {
+				s_w = rw;
+				s_h = rh;
+			} else {
+				LOG_L(L_ERROR, "[EGL] SPRING_MAC_PERF_RENDER_SIZE=\"%s\" is malformed "
+				               "(want <W>x<H>, e.g. 2560x1440) — ignoring", rs);
+			}
+		}
+	}
+	if (s_w <= 0 || s_h <= 0)
+		return false;
+	w = s_w;
+	h = s_h;
+	return true;
+}
+
 // MacPresentDirect config value, mirrored here so the present path does not
 // query the config map every frame; the observer registered in CreateContext
 // keeps it current (config changes still apply mid-run, which the perf
@@ -334,13 +365,39 @@ bool CreateContext(SDL_Window* window)
 	int pxW = (int)(winW * bsf + 0.5);
 	int pxH = (int)(winH * bsf + 0.5);
 	if (pxW <= 0 || pxH <= 0) { pxW = 1280; pxH = 720; }
+
+	// ---- BENCHMARK PIN: SPRING_MAC_PERF_RENDER_SIZE=<W>x<H> ------------------
+	// Perf-test only. Everything above derives the render resolution from the
+	// hardware, through FOUR separate couplings, so the "same" benchmark is a
+	// different workload on every setup (all measured 2026-08-07):
+	//   1. the window itself is clamped to fit the screen — a 1920x1080 pin
+	//      actually got 1873x1018 on a 1920x1080 panel (menu bar + title bar);
+	//   2. bsf is the monitor's backing scale (1x here, 2x on the Dell = 4x
+	//      the pixels for an identical command line);
+	//   3. EffectiveBackingScale's panel-native cap keys off the desktop being
+	//      a scaled mode;
+	//   4. its GPU pixel budget keys off GPU CORE COUNT (60 cores -> 36 MP and
+	//      never caps; a 10-core Air -> 6 MP and does).
+	// Overriding pbuf directly bypasses all four at once. This is the same
+	// mechanism SPRING_MAC_NO_RETINA already relies on — the Metal present pass
+	// linear-samples the source into the drawable, so a render target that does
+	// not match the window is scaled at present time (up or down) for free.
+	// GetDrawableSize() returns pbufW/pbufH, so the engine's viewport and FBO
+	// follow this automatically and stay consistent.
+	const bool perfSize = PerfPinnedRenderSize(pxW, pxH);
+
 	pbufW = pxW;
 	pbufH = pxH;
-	LOG("[EGL] window %dx%d pts * %.2f scale -> pbuffer %dx%d px%s",
+	LOG("[EGL] window %dx%d pts * %.2f scale -> pbuffer %dx%d px%s%s",
 			winW, winH, bsf, pxW, pxH,
-			noRetina ? " (SPRING_MAC_NO_RETINA=1)" : "");
+			noRetina ? " (SPRING_MAC_NO_RETINA=1)" : "",
+			perfSize ? " (SPRING_MAC_PERF_RENDER_SIZE — hardware-independent)" : "");
 	if (noRetina)
 		LOG("[EGL] true backing scale=%.2f; CoreAnimation will upscale", bsfTrue);
+	if (perfSize)
+		LOG("[EGL] perf pin: render %dx%d = %.2f MP, independent of window (%dx%d pt), "
+		    "backing scale (%.2f), panel and GPU core count",
+		    pxW, pxH, (pxW * (double)pxH) / 1.0e6, winW, winH, bsfTrue);
 
 	if (nativeView) {
 		eglSfc = eglCreateWindowSurface(eglDpy, chosenConfig, (EGLNativeWindowType)nativeView, NULL);
@@ -737,6 +794,17 @@ void ResizeIfNeeded(SDL_Window* window)
 	SDL_GetWindowSize(window, &winW, &winH);
 	if (winW <= 0 || winH <= 0)
 		return;
+
+	// A pinned benchmark render size outranks the window: resizing the pbuffer
+	// to follow the window would re-introduce exactly the hardware coupling the
+	// pin exists to remove, and would do it silently mid-run.
+	int pinW = 0, pinH = 0;
+	if (PerfPinnedRenderSize(pinW, pinH)) {
+		if (pinW != pbufW || pinH != pbufH)
+			LOG("[EGL] resize ignored: render size pinned to %dx%d "
+			    "(SPRING_MAC_PERF_RENDER_SIZE)", pinW, pinH);
+		return;
+	}
 
 	const double bsf = EffectiveBackingScale(window);
 	const int    pxW = std::max(1, int(std::lround(double(winW) * bsf)));

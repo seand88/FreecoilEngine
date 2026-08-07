@@ -3,6 +3,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <IOSurface/IOSurface.h>
+#import <CoreGraphics/CoreGraphics.h>  // CGColorSpaceCreateWithName (perf-pin colorspace)
 
 #include "MetalPresent.h"
 #include <vector>
@@ -179,6 +180,14 @@ static bool BuildPresentPipelines()
     return (g_presentPSO != nil && g_presentPSO_flip != nil && g_linearSampler != nil);
 }
 
+// Benchmark pin, parsed once. Perf-test only — see the block in
+// MacMetalPresent_Init for what it pins and why.
+static bool PerfPinActive()
+{
+	static const bool s_on = (getenv("SPRING_MAC_PERF_PIN") != nullptr);
+	return s_on;
+}
+
 bool MacMetalPresent_Init(void* caMetalLayer)
 {
 	if (g_device != nil)
@@ -213,6 +222,58 @@ bool MacMetalPresent_Init(void* caMetalLayer)
 	// 120Hz panel, metal-submit ~12ms): make the pool depth explicit.
 	// displaySync stays ON — this only deepens buffering, never tears.
 	g_layer.maximumDrawableCount = 3;
+
+	// ---- BENCHMARK PINS (SPRING_MAC_PERF_PIN=1) -----------------------------
+	// Perf-test only. A benchmark number must not be a function of which
+	// monitor is attached, and by default it is — in three ways that all land
+	// on THIS layer:
+	//
+	//   1. displaySyncEnabled defaults to YES, so presents are paced by the
+	//      panel's refresh. Measured 2026-08-07: a 60Hz panel produced
+	//      maxFps=30.0 (exactly refresh/2, the artifact the comment above
+	//      describes at 60 on a 120Hz panel) and a steady 18.9 fps sitting on
+	//      60/3. The engine's SDL_GL_SetSwapInterval(0) does NOT reach here —
+	//      under EGL_PLATFORM=surfaceless eglSwapBuffers "presents nowhere"
+	//      (MacPresentBackend.mm) and this manual Metal path is the only
+	//      present. So vsync was effectively ON for every perf run ever taken.
+	//   2. colorspace defaults to nil, which makes the compositor match to
+	//      whatever ICC profile the attached monitor ships (measured:
+	//      "NanoKVM-Pro" on the test panel, Display P3 on the Dell).
+	//   3. EDR is left implicit. It happens to be off, but "happens to be" is
+	//      what this whole block exists to eliminate.
+	//
+	// Tearing is expected and fine here — nothing watches a benchmark. Never
+	// enable this for play; it is opt-in via env for exactly that reason.
+	if (PerfPinActive()) {
+		g_layer.displaySyncEnabled = NO;   // free-running: refresh rate cannot cap fps
+		g_layer.wantsExtendedDynamicRangeContent = NO;  // explicit SDR, never inferred
+		// contentsScale comes from NSWindow.backingScaleFactor (AttachMetalLayer),
+		// so the PRESENT target — bounds * contentsScale, see
+		// EnsureLayerDrawableSize — still doubles on a 2x monitor even when the
+		// RENDER size is pinned. Pin it to 1.0 so the present blit is sized in
+		// points, not backing pixels. EnsureLayerDrawableSize enforces the same
+		// value independently, in case AppKit re-derives contentsScale on a
+		// display change (it owns the layer, so it may).
+		g_layer.contentsScale = 1.0;
+		// 8-bit is already guaranteed upstream (EGL config is hard-coded
+		// 8/8/8/8 and every readback is GL_UNSIGNED_BYTE); pixelFormat above
+		// is BGRA8Unorm. Pinning the colorspace is the missing half — it makes
+		// the compositor's conversion a fixed, defined input instead of a
+		// per-monitor one.
+		// Guarded: spring-headless compiles this file but does not link
+		// CoreGraphics, and it never presents anyway, so there is no colorspace
+		// to pin there.
+		#if !defined(HEADLESS)
+		CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+		if (srgb != nullptr) {
+			g_layer.colorspace = srgb;
+			CGColorSpaceRelease(srgb);
+		}
+		#endif
+		fprintf(stderr, "[MetalPresent] PERF PIN: displaySync=OFF EDR=OFF colorspace=sRGB "
+		                "pixelFormat=BGRA8Unorm maxDrawables=%lu\n",
+		        (unsigned long)g_layer.maximumDrawableCount);
+	}
 	return true;
 }
 
@@ -351,7 +412,12 @@ static bool EnsureIOSurfaceBacking(int w, int h)
     // (2x). Setting drawableSize to the smaller IOSurface size makes
     // CoreAnimation place the drawable at 1:1 in a corner of the layer.
     const CGSize  lbSize  = g_layer.bounds.size;
-    const CGFloat cs      = g_layer.contentsScale > 0 ? g_layer.contentsScale : 1.0;
+    // Under the benchmark pin the present target is sized in POINTS: AppKit owns
+    // this layer and can re-derive contentsScale from the display, which would
+    // put the monitor's backing scale back into the measured present cost.
+    const CGFloat cs      = PerfPinActive()
+                              ? 1.0
+                              : (g_layer.contentsScale > 0 ? g_layer.contentsScale : 1.0);
     const CGFloat targetW = lbSize.width  * cs;
     const CGFloat targetH = lbSize.height * cs;
     const CGFloat finalW  = targetW > 0 ? targetW : (CGFloat)w;
@@ -436,7 +502,9 @@ void MacMetalPresent_PresentIOSurface(bool flipY)
                 fprintf(stderr, "[MetalPresent] nextDrawable nil x%llu (IOSurface path)\n",
                         (unsigned long long)s_nilStreak);
             const CGSize  lb = g_layer.bounds.size;
-            const CGFloat cs = g_layer.contentsScale > 0 ? g_layer.contentsScale : 1.0;
+            const CGFloat cs = PerfPinActive()
+                                 ? 1.0  // benchmark pin: present target in points
+                                 : (g_layer.contentsScale > 0 ? g_layer.contentsScale : 1.0);
             if (lb.width > 0 && lb.height > 0)
                 g_layer.drawableSize = CGSizeMake(lb.width * cs, lb.height * cs);
             dispatch_semaphore_signal(g_presentBudget);
@@ -490,7 +558,12 @@ static void EnsureLayerDrawableSize(int w, int h)
     if (w == s_lastW && h == s_lastH)
         return;
     const CGSize  lbSize  = g_layer.bounds.size;
-    const CGFloat cs      = g_layer.contentsScale > 0 ? g_layer.contentsScale : 1.0;
+    // Under the benchmark pin the present target is sized in POINTS: AppKit owns
+    // this layer and can re-derive contentsScale from the display, which would
+    // put the monitor's backing scale back into the measured present cost.
+    const CGFloat cs      = PerfPinActive()
+                              ? 1.0
+                              : (g_layer.contentsScale > 0 ? g_layer.contentsScale : 1.0);
     const CGFloat targetW = lbSize.width  * cs;
     const CGFloat targetH = lbSize.height * cs;
     g_layer.drawableSize = CGSizeMake(targetW > 0 ? targetW : (CGFloat)w,
@@ -570,7 +643,9 @@ bool MacMetalPresent_PresentPixelBuffer(void* base, size_t len, int w, int h,
                 fprintf(stderr, "[MetalPresent] nextDrawable nil x%llu — display transition? re-deriving drawableSize\n",
                         (unsigned long long)s_nilStreak);
             const CGSize  lb = g_layer.bounds.size;
-            const CGFloat cs = g_layer.contentsScale > 0 ? g_layer.contentsScale : 1.0;
+            const CGFloat cs = PerfPinActive()
+                                 ? 1.0  // benchmark pin: present target in points
+                                 : (g_layer.contentsScale > 0 ? g_layer.contentsScale : 1.0);
             if (lb.width > 0 && lb.height > 0)
                 g_layer.drawableSize = CGSizeMake(lb.width * cs, lb.height * cs);
             dispatch_semaphore_signal(g_presentBudget);
