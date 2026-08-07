@@ -101,7 +101,7 @@ from the maintainer:
   9/9 libm hash gate in every build), x86 conversion semantics reproduced on
   arm64, `-ffp-contract=off` enforced globally, and a UB sweep of synced code
   — then certified bit-exact over full-length 8v8 replays and live
-  cross-platform matches ([SYNC_VALIDATION.md](SYNC_VALIDATION.md); the
+  cross-platform matches ([SYNC_VALIDATION.md](docs/SYNC_VALIDATION.md); the
   complete register of synced-code changes is its Appendix A).
 - **A rebuilt macOS graphics-present path.** The EGL/Metal context and the whole
   read-back-and-present pipeline were extracted into a proper `Platform/Mac`
@@ -127,7 +127,7 @@ build.
   (up to 92,040 frames) and live LAN games versus unmodified official Linux
   and Windows release binaries, including 16-player games and PvE modes,
   with zero sync errors. Method, numbers, reproduction commands, and honest
-  limits: **[SYNC_VALIDATION.md](SYNC_VALIDATION.md)**.
+  limits: **[SYNC_VALIDATION.md](docs/SYNC_VALIDATION.md)**.
 
   > **Online play is currently disabled in released builds** while approval
   > to connect to BAR's community servers is sought from the game's creators.
@@ -148,7 +148,7 @@ build.
   | Early game | 50.6 fps | display-limited (120 Hz) |
 
   What changed and why, with the methodology:
-  **[IMPROVEMENTS.md](IMPROVEMENTS.md)**.
+  **[IMPROVEMENTS.md](docs/IMPROVEMENTS.md)**.
 - Retina/HiDPI, dynamic window resize, borderless fullscreen, lobby
   (Chobby) networking, music/effects via openal-soft, P/E-core-aware
   threading.
@@ -269,8 +269,8 @@ work on the port (with or without an AI agent).
 |---|---|
 | [AGENTS.md](AGENTS.md) | Start here to work on the port: read-order, the hard rules, and how to build. Written so an AI coding agent can get up and running. |
 | [docs/PORTING_PRINCIPLES.md](docs/PORTING_PRINCIPLES.md) | The golden rules — the determinism contract, sim untouchability, per-subsystem strategy, and the verification ladder. |
-| [SYNC_VALIDATION.md](SYNC_VALIDATION.md) | How multiplayer bit-exactness is proven: method, numbers, reproduction commands, and honest limits. |
-| [IMPROVEMENTS.md](IMPROVEMENTS.md) | What the port changes and why — each entry symptom → cause → fix → measured result. |
+| [SYNC_VALIDATION.md](docs/SYNC_VALIDATION.md) | How multiplayer bit-exactness is proven: method, numbers, reproduction commands, and honest limits. |
+| [IMPROVEMENTS.md](docs/IMPROVEMENTS.md) | What the port changes and why — each entry symptom → cause → fix → measured result. |
 | [docs/MAINTENANCE.md](docs/MAINTENANCE.md) | How the macOS layer rides upstream: the version-bump / rebase-onto-a-new-release procedure. |
 | [docs/AGENT_FAILURE_MODES.md](docs/AGENT_FAILURE_MODES.md) | What halts or silently misleads an automated agent on macOS (dialogs, permissions, fallbacks). |
 | [docs/LESSONS.md](docs/LESSONS.md) | Numbered, citable gotchas already hit during the port. |
