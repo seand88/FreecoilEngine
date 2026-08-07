@@ -170,6 +170,20 @@ public:
 	int winSizeX;
 	int winSizeY;
 
+	/// the window size in desktop *points*. Identical to winSize{X,Y} on every
+	/// platform where a point is a pixel; on macOS winSize{X,Y} is the Retina
+	/// backing-pixel size of the render target while screenSize*, screenPos*
+	/// and winPos* come from SDL in points. Mixing the two silently corrupts
+	/// point-space arithmetic (see GetWinPosYBottomLeft).
+	int winSizeXpt;
+	int winSizeYpt;
+
+	/// window Y position converted to a BOTTOMLEFT origin, in desktop points.
+	/// Uses winSizeYpt, NOT winSizeY: on a 2x Retina display the pixel height
+	/// is twice the point height, which drove this negative (BAR's Lua UI sees
+	/// this value via Spring.GetWindowGeometry and the ViewResize callin).
+	int GetWinPosYBottomLeft() const { return screenSizeY - winSizeYpt - winPosY; }
+
 	/// the viewport position relative to the window's top-left corner
 	int viewPosX;
 	int viewPosY;

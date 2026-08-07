@@ -2585,7 +2585,7 @@ void CLuaHandle::ViewResize()
 	if (!cmdStr.GetGlobalFunc(L))
 		return;
 
-	const int winPosY_bl = globalRendering->screenSizeY - globalRendering->winSizeY - globalRendering->winPosY; //! origin BOTTOMLEFT
+	const int winPosY_bl = globalRendering->GetWinPosYBottomLeft(); //! origin BOTTOMLEFT
 
 	lua_createtable(L, 0, 16);
 	LuaPushNamedNumber(L, "screenSizeX", globalRendering->screenSizeX);

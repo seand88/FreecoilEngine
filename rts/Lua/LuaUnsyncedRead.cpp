@@ -934,7 +934,7 @@ int LuaUnsyncedRead::GetDualViewGeometry(lua_State* L)
 int LuaUnsyncedRead::GetWindowGeometry(lua_State* L)
 {
 	// origin BOTTOMLEFT
-	const int winPosY_bl = globalRendering->screenSizeY - globalRendering->winSizeY - globalRendering->winPosY;
+	const int winPosY_bl = globalRendering->GetWinPosYBottomLeft();
 
 	lua_pushnumber(L, globalRendering->winSizeX);
 	lua_pushnumber(L, globalRendering->winSizeY);

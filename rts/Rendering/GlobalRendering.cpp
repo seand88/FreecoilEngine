@@ -258,6 +258,8 @@ CGlobalRendering::CGlobalRendering()
 	, winPosY(configHandler->GetInt("WindowPosY"))
 	, winSizeX(1)
 	, winSizeY(1)
+	, winSizeXpt(1)
+	, winSizeYpt(1)
 
 	// viewport geometry
 	, viewPosX(0)
@@ -1967,6 +1969,8 @@ void CGlobalRendering::ReadWindowPosAndSize()
 	screenSizeY = 8;
 	winSizeX = 8;
 	winSizeY = 8;
+	winSizeXpt = 8;
+	winSizeYpt = 8;
 	winPosX = 0;
 	winPosY = 0;
 	winBorder = { 0 };
@@ -1986,6 +1990,13 @@ void CGlobalRendering::ReadWindowPosAndSize()
 		UpdateWindowBorders(sdlWindow);
 
 	SDL_GetWindowSize(sdlWindow, &winSizeX, &winSizeY);
+
+	// SDL reports the window size in points; keep that before the macOS block
+	// below replaces winSize{X,Y} with the Retina backing-pixel size. Off macOS
+	// nothing overwrites them, so the two stay equal.
+	winSizeXpt = winSizeX;
+	winSizeYpt = winSizeY;
+
 #if defined(__APPLE__) && !defined(HEADLESS)
 	{
 		// True dynamic-resolution resize: recreate the pbuffer FBO at the

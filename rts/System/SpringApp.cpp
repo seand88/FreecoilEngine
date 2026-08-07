@@ -1248,8 +1248,32 @@ bool SpringApp::MainEventHandler(const SDL_Event& event)
 					// borderless nor fullScreen) is never confined.
 					if (globalRendering->borderless || globalRendering->fullScreen)
 						globalRendering->SetWindowInputGrabbing(true);
+
+					// Also re-assert cursor visibility; see the ENTER case below.
+					SDL_SetCursor(nullptr);
 #endif
 				} break;
+#if defined(__APPLE__) && !defined(HEADLESS)
+				// The macOS system cursor can sit on top of the engine-drawn one
+				// until AppKit re-evaluates this window's cursor rects. SDL's
+				// Cocoa backend applies cursor visibility ONLY through those rects
+				// (Cocoa_ShowCursor just fires an async invalidateCursorRectsForView;
+				// the view's resetCursorRects then installs NSCursor.invisibleCursor),
+				// and AppKit re-runs resetCursorRects on key-window changes and on
+				// mouse entry — which is exactly why cmd-tabbing out and back has
+				// always "fixed" it. On first show neither has happened yet, so the
+				// hide the engine already requested is never applied.
+				//
+				// Re-calling SDL_ShowCursor(SDL_DISABLE) here would do nothing: it
+				// early-outs when the requested state already matches the current
+				// one. SDL_SetCursor(nullptr) is the documented way to force the
+				// refresh ("can be used to force the cursor redraw ... used when
+				// the SDL window gains the mouse focus"), and it re-applies whatever
+				// state the engine currently wants rather than overriding it.
+				case SDL_WINDOWEVENT_ENTER: {
+					SDL_SetCursor(nullptr);
+				} break;
+#endif
 				case SDL_WINDOWEVENT_FOCUS_LOST: {
 					Watchdog::ClearTimer(WDT_MAIN, true);
 
