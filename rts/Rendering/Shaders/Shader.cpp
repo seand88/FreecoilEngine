@@ -726,13 +726,61 @@ namespace Shader {
 			}
 		}
 
+		// Restore uniforms BEFORE validating, and do not gate the restore on the
+		// validation result. Both halves matter; the old order was
+		//     Validate(); if (IsValid()) GLSLCopyState(...);
+		// which is a deadlock:
+		//
+		//  1. a freshly re-linked program has every sampler uniform back at GL's
+		//     default texture image unit 0. Validation at that point FAILS for any
+		//     variant declaring more than one sampler TYPE, because putting e.g. a
+		//     sampler2D and a sampler2DShadow on the same unit is illegal
+		//     ("active samplers with a different type refer to the same texture
+		//     image unit");
+		//  2. gating the restore on that validation then prevents the very copy
+		//     that would have assigned the units and made the program valid. It
+		//     stays invalid for the rest of its life.
+		//
+		// WHY IT LOOKED MAP-SPECIFIC. The trigger needs BOTH of:
+		//   * a runtime re-link -- SMFRenderStateGLSL::Enable flips HAVE_SHADOWS
+		//     and HAVE_INFOTEX after setup, so the SMF shader re-links once
+		//     shadows load or an info overlay is toggled (with shadows off the
+		//     flag never changes and nothing re-links);
+		//   * a variant declaring several sampler TYPES. SMFFragProg.glsl guards
+		//     samplerCube skyReflectTex and sampler2DShadow shadowTex behind
+		//     SMF_SKY_REFLECTIONS / HAVE_SHADOWS, which are set per map from the
+		//     map's own textures. Maps without those compile a variant that is all
+		//     sampler2D, where colliding on unit 0 is legal and nothing breaks.
+		// Hence only some maps: Onyx Cauldron and Crystallized Plains failed while
+		// Red Comet Remake, Full Metal Plate, Death Valley, Proving Grounds and
+		// Great Divide were fine.
+		//
+		// The damage is not limited to the map: an invalid program left bound
+		// stops UNTEXTURED 2D primitives rasterizing engine-wide, so BAR's HUD
+		// lost every panel background while its textured text and icons still
+		// drew. It went unnoticed for so long because validation is skipped
+		// outright on AMD and Intel (see the guard below).
+		//
+		// NB IsValid() below can now only reflect the LINK result, since nothing
+		// sets `valid` between the link and this line -- which is the intended
+		// condition for restoring uniforms.
+		//
+		// LIMITATION: this repairs the ordering, not the whole class. The restore
+		// draws on the persistent uniformStates cache, so a sampler that was never
+		// assigned even once has no value to restore and would still sit on unit 0.
+		// SMFRenderState assigns all of its samplers during setup, which is why
+		// this suffices there. Declaring layout(binding = N) in the GLSL would
+		// remove the failure mode entirely.
+		//
+		// Reproducer + full investigation: docs/DEVLOG.md 2026-08-05, LESSON-48.
+		// Regression test: visreg scene `testcard_shadowmap` (2 pass/16 fail before
+		// this change, 15/0 after).
+		if (IsValid())
+			GLSLCopyState(objID, oldValid ? oldProgID : 0, &uniformStates);
+
 		// FIXME: fails on ATI, see https://springrts.com/mantis/view.php?id=4715
 		if (validate && (!globalRendering->haveAMD && !globalRendering->haveIntel))
 			Validate();
-
-		// copy full program state from old to new program (uniforms etc.)
-		if (IsValid())
-			GLSLCopyState(objID, oldValid ? oldProgID : 0, &uniformStates);
 
 		// delete old program when not further used
 		if (deleteOldShader)
