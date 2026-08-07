@@ -72,6 +72,13 @@ public:
 	void GetWindowPosSizeBounded(int& x, int& y, int& w, int& h) const;
 
 	void SetWindowTitle(const std::string& title);
+	/// Re-stamps the title with the TRUE render resolution when
+	/// ShowRenderSizeInTitle is set. Test-harness aid: the render target is not
+	/// the window size (Retina scale, and the perf pin decouples them outright),
+	/// so the only place the real number was visible was the log.
+	void UpdateWindowTitleRenderSize();
+	/// pushes windowTitleBase (+ the render-size suffix when enabled) to SDL
+	void ApplyWindowTitle();
 	void SetWindowAttributes(SDL_Window* window);
 	void UpdateWindow();
 	void UpdateTimer();
@@ -440,6 +447,9 @@ private:
 	void SetMinSampleShadingRate();
 	bool SetWindowMinMaximized(bool maximize) const;
 private:
+	/// title as requested at window creation, kept so the render-resolution
+	/// suffix can be re-applied on every resize without compounding.
+	std::string windowTitleBase;
 	spring::unordered_set<std::string> glExtensions;
 	// double-buffered; results from frame N become available on frame N+1
 	std::array<uint32_t, NUM_OPENGL_TIMER_QUERIES * 2> glTimerQueries;

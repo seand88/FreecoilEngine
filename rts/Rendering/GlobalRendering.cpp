@@ -51,6 +51,9 @@
 
 #include "System/Misc/TracyDefs.h"
 
+CONFIG(bool, ShowRenderSizeInTitle)
+	.defaultValue(false)
+	.description("Append the TRUE render resolution (the drawable/FBO size, which is not the window size) to the window title. Test-harness aid; off for players.");
 CONFIG(bool, DebugGL).defaultValue(false).description("Enables GL debug-context and output. (see GL_ARB_debug_output)");
 CONFIG(bool, DebugGLStacktraces).defaultValue(false).description("Create a stacktrace when an OpenGL error occurs");
 CONFIG(bool, DebugGLReportGroups).defaultValue(false).description("Show OpenGL PUSH/POP groups in the GL debug");
@@ -546,6 +549,8 @@ SDL_GLContext CGlobalRendering::CreateGLContext(const int2& minCtx)
 
 bool CGlobalRendering::CreateWindowAndContext(const char* title)
 {
+	windowTitleBase = (title != nullptr) ? title : "";
+
 	if (SDL_Init(SDL_INIT_VIDEO) == -1) {
 		LOG_L(L_FATAL, "[GR::%s] error \"%s\" initializing SDL", __func__, SDL_GetError());
 		return false;
@@ -1484,8 +1489,40 @@ void CGlobalRendering::GetWindowPosSizeBounded(int& x, int& y, int& w, int& h) c
 	h = std::max(h, minRes.y * (1 - fullScreen)); h = std::min(h, r.h - y);
 }
 
+// The window title is the one place a human watching a test run can see what
+// was ACTUALLY rendered. It is deliberately not the window size: on Retina the
+// drawable is 2x the points, and SPRING_MAC_PERF_RENDER_SIZE decouples the two
+// entirely (a 1280x720-pt window rendering 2560x1440). Both of those have
+// already produced numbers that were compared against baselines taken at a
+// different pixel count, so surface the real value instead of inferring it.
+void CGlobalRendering::UpdateWindowTitleRenderSize()
+{
+	ApplyWindowTitle();
+}
+
 void CGlobalRendering::SetWindowTitle(const std::string& title)
 {
+	// Remember the caller's title UNDECORATED. BAR's Lua re-titles the window
+	// after load (Spring.SetWindowTitle -> here), so the suffix has to be
+	// re-applied on top of whatever the game last asked for; storing the
+	// decorated string instead would compound it on every call.
+	windowTitleBase = title;
+	ApplyWindowTitle();
+}
+
+void CGlobalRendering::ApplyWindowTitle()
+{
+	std::string title = windowTitleBase;
+
+	// winSize{X,Y} is the render target, not the window: on macOS
+	// ReadWindowPosAndSize() overwrites it with the EGL pbuffer (== drawable ==
+	// FBO) size. On Retina that is 2x the points, and SPRING_MAC_PERF_RENDER_SIZE
+	// decouples the two outright (a 1280x720-pt window rendering 2560x1440).
+	// Both have already produced numbers compared against baselines taken at a
+	// different pixel count, so show the real value rather than inferring it.
+	if (configHandler->GetBool("ShowRenderSizeInTitle") && winSizeX > 0 && winSizeY > 0)
+		title += " | render " + IntToString(winSizeX) + "x" + IntToString(winSizeY);
+
 	// SDL_SetWindowTitle deadlocks in case it's called from non-main thread (during the MT loading).
 
 	static auto SetWindowTitleImpl = [](SDL_Window* sdlWindow, const std::string& title) {
@@ -2183,6 +2220,9 @@ void CGlobalRendering::UpdateGLGeometry()
 	UpdateViewPortGeometry();
 	UpdatePixelGeometry();
 	UpdateScreenMatrices();
+
+	// after ReadWindowPosAndSize(), so a resize (or the perf pin) is reflected
+	UpdateWindowTitleRenderSize();
 
 	LOG("[GR::%s][2] winSize=<%d,%d>", __func__, winSizeX, winSizeY);
 }
