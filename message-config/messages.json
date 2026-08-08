@@ -41,17 +41,22 @@
       ]
     },
     {
-      "id": "update-0.12",
-      "date": "2026-07-24",
+      "id": "update-0.13",
+      "date": "2026-08-04",
       "target": {
         "op": "lt",
-        "version": "0.12"
+        "version": "0.13"
       },
       "title": "Update Available",
       "body": [
         "<p style='font-family:-apple-system;font-size:13px'>",
-        "Recoil Engine for macOS has a new version available with critical fixes ",
-        "for BAR players.",
+        "A new version of BAR Launcher is available. Updating is optional \u2014 you ",
+        "can keep playing on this one.",
+        "</p>",
+        "<p style='font-family:-apple-system;font-size:13px'>",
+        "v0.13 fixes the in-game interface losing its panel backgrounds on some ",
+        "maps, and brings back health bars, build-progress bars, and build and ",
+        "reclaim particles.",
         "</p>"
       ],
       "frequency": "always",

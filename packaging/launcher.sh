@@ -155,6 +155,53 @@ if [ -f "$RES/default_springsettings.cfg" ]; then
     grep -q "^$key " "$CFG" 2>/dev/null || echo "$kv" >> "$CFG"
   done < "$RES/default_springsettings.cfg"
 fi
+# "potato GPU" mitigation (2026-08-04). BAR's own gui_options.lua classifies the
+# GPU by VENDOR, and its chain is: no-GL4 -> potato; NVidia -> check VRAM;
+# Intel -> needs "arc"; AMD -> needs "rx"/"r9"; else -> potato. Apple Silicon via
+# zink/KosmicKrisp reports vendor "Mesa" and matches none of them, so EVERY Apple
+# Mac lands in the catch-all else and is branded low-end (introduced upstream
+# 2026-06-30 in 336cf9d9, so v0.11 and v0.12 shipped with it too). On FIRST LAUNCH
+# only, that branch writes: water 0, Shadows 0, ShadowMapSize 1024, MSAALevel 0 --
+# i.e. it permanently disables water and shadows on an M2 Ultra.
+#
+# We cannot fix the detection: game content is reference-only (PORTING_PRINCIPLES
+# §0) and ships from BAR's CDN, so there is nothing local to patch. The proper fix
+# is an Apple/Metal branch upstream -- see docs/OUTSTANDING.md; this is the
+# interim, port-side mitigation.
+#
+# Mechanism: that whole block is gated on `firstlaunchsetupDone`, which BAR
+# persists as `firsttimesetupDone` in its LuaUI config. Seeding that marker makes
+# BAR skip the downgrade. Because skipping it also skips the GOOD first-launch
+# defaults, we reproduce those here (they are plain config values).
+# Deliberately seeded ONLY when the config is absent, i.e. a genuinely fresh
+# install -- a returning user's file is never touched, and everything below stays
+# changeable from BAR's own settings UI.
+BYAR_CFG="$WRITEDIR/LuaUI/Config/BYAR.lua"
+if [ ! -f "$BYAR_CFG" ]; then
+  mkdir -p "$WRITEDIR/LuaUI/Config"
+  cat > "$BYAR_CFG" <<'BYAREOF'
+-- Widget Custom data and order, order = 0 disabled widget
+-- Seeded by the macOS launcher on first run: see the "potato GPU" note in
+-- packaging/launcher.sh. Only `firsttimesetupDone` is pre-set, so BAR does not
+-- misclassify Apple Silicon and disable water/shadows. No widget order is
+-- specified, so every widget keeps its stock default state.
+return {
+	allowUserWidgets = true,
+	data = {
+		Options = {
+			firsttimesetupDone = true,
+			desiredWaterValue = 4,
+		},
+	},
+}
+BYAREOF
+  # the non-potato first-launch defaults BAR would otherwise have applied
+  for kv in "Water = 4" "MaxParticles = 12000" "CamMode = 3"; do
+    key="${kv%% =*}"
+    grep -q "^$key " "$CFG" 2>/dev/null || echo "$kv" >> "$CFG"
+  done
+fi
+
 if [ -d "$WRITEDIR/log" ]; then
   ls -t "$WRITEDIR/log"/*.log 2>/dev/null | tail -n +11 | while read -r f; do rm -f "$f"; done
 fi

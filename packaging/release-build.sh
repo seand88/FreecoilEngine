@@ -21,12 +21,27 @@ set -euo pipefail
 
 BAR="${BAR:-$(cd "$(dirname "$0")/.." && pwd)}"
 PKG="$BAR/packaging"
-SRC="${ENGINE_SRC:-$([ -d "$BAR/rts" ] && echo "$BAR" || echo "$BAR/engine-2025.06.24")}"
-BUILD="${ENGINE_BUILD:-$BAR/build-engine-2025.06.24-release}"
+# The shipped pair lives in ONE place, shared with scripts/visreg.sh so the
+# release gate and an interactive visreg run cannot drift apart. Bump it there.
+. "$PKG/ship-config.sh"
+BUILD_HINT="${ENGINE_BUILD:-$SHIP_ENGINE_BUILD}"
+# Source tree: FOLLOW THE BUILD DIR we are told to package, do not name a tree.
+# This was hardcoded to $BAR/engine-2025.06.24, which stopped being the shipping
+# tree on 2026-08-07 when the 2026.07.04 lane was consolidated into engine/. With
+# ship-config pointing BUILD at build-engine-2026.07.04, a bare release build
+# would have reconfigured that dir onto the OLD source and packaged 2025.06.24
+# code as v0.13. build-engine.sh's source-tree guard refused it (LESSON-59) —
+# this is the fifth script found pinning a path instead of following its input,
+# and the first where the consequence would have been a mislabelled RELEASE.
+if [ -z "${ENGINE_SRC:-}" ] && [ -f "$BUILD_HINT/CMakeCache.txt" ]; then
+  ENGINE_SRC=$(awk -F= '/^CMAKE_HOME_DIRECTORY:INTERNAL=/{print $2}' "$BUILD_HINT/CMakeCache.txt")
+fi
+SRC="${ENGINE_SRC:-$([ -d "$BAR/rts" ] && echo "$BAR" || echo "$BAR/engine")}"
+BUILD="${ENGINE_BUILD:-$SHIP_ENGINE_BUILD}"
 OUT="${RELEASE_OUT:-$BAR/release-artifacts}"
 # release driver prefix: built from the mesa bar-macos branch (never the
 # experiments driver the dev/play stack uses)
-MESA_PREFIX="${MESA_PREFIX:-$BAR/deps/mesa-native-release}"
+MESA_PREFIX="${MESA_PREFIX:-$SHIP_MESA_PREFIX}"
 IDENTITY="-"           # "-" = ad-hoc
 NOTARY_PROFILE=""
 # App Store Connect API-key auth (alternative to the keychain profile, and
@@ -57,12 +72,21 @@ PORTVER="$(cat "$PKG/PORT_VERSION" 2>/dev/null | tr -d '[:space:]')"
 #            and dylib closure, no game configuration or branding. For any
 #            Spring/Recoil game community, or for building other helpers on.
 PROFILE=bar
-# Online play (bar profile): ENABLED by default. Build with --disable-online
-# (or BAR_ONLINE=0) to neuter it: the staged chobby_config.json then points
-# the lobby at an unreachable loopback endpoint and the launcher shows a
-# once-per-version notice. Engine-level networking (direct/LAN) is untouched
-# either way.
-ENABLE_ONLINE="${BAR_ONLINE:-1}"
+# Online play (bar profile): **DISABLED by default, and that is a standing rule,
+# not a per-release choice** (user decision, 2026-08-08). Every release so far has
+# been respun with --disable-online before shipping — v0.11 and v0.12 both were —
+# so the default was a trap: it made the safe outcome depend on someone
+# remembering a flag, and forgetting it publishes a build that reaches BAR's real
+# lobby servers. The default now matches the rule.
+#
+# Disabled means the staged chobby_config.json points the lobby at an unreachable
+# loopback endpoint and the launcher shows a once-per-version notice. Engine-level
+# networking (direct/LAN) is untouched either way.
+#
+# --enable-online (or BAR_ONLINE=1) is a DELIBERATE opt-in and must not be used
+# for a public artifact without an explicit decision to seek approval from BAR's
+# maintainers first; see docs/OUTSTANDING.md on the online-play posture.
+ENABLE_ONLINE="${BAR_ONLINE:-0}"
 # Message config source (bar profile): where the shipped launcher fetches
 # messages.json each launch. Default = the port's GitHub repo. Override with
 # --messages-config <https-url> or --messages-local <path> (a local file,
@@ -100,8 +124,8 @@ while [ $# -gt 0 ]; do
     --version) VERSION=$2; VERSION_EXPLICIT=1; shift 2;;
     --port-version) PORTVER=$2; shift 2;;
     --profile) PROFILE=$2; shift 2;;
-    --enable-online) ENABLE_ONLINE=1; shift;;   # now the default; kept for compat
-    --disable-online) ENABLE_ONLINE=0; shift;;
+    --enable-online) ENABLE_ONLINE=1; shift;;   # DELIBERATE opt-in; never for a public artifact
+    --disable-online) ENABLE_ONLINE=0; shift;;  # now the default; kept for explicitness
     --messages-config) MESSAGES_CONFIG=$2; shift 2;;
     --messages-local)
       [ -f "$2" ] || { echo "FATAL: --messages-local $2: no such file"; exit 2; }
@@ -190,8 +214,28 @@ fi
 
 echo "=== [2/7] replay certification (opt-in; --certify / RELEASE_CERTIFY=1)"
 if [ "$REPLAY_SMOKE" = "1" ]; then
-  SMOKE_DEMO="${RELEASE_SMOKE_DEMO:-$(ls "$BAR"/refdemos/*_2025.06.24.sdfz 2>/dev/null | head -1)}"
-  [ -n "$SMOKE_DEMO" ] || { echo "FATAL: --certify given but no smoke demo found (set RELEASE_SMOKE_DEMO)"; exit 1; }
+  # FOLLOW THE ENGINE WE ARE PACKAGING, do not name a lane. This glob was pinned
+  # to *_2025.06.24.sdfz, so on the 2026.07.04 lane `make certify` picked a demo
+  # recorded by the OLD engine and replay-check.sh correctly refused it
+  # ("VERSION_MISMATCH: demo=2025.06.24 binary=2026.07.04"), taking the whole
+  # release build down with it — while refdemos/2026.07.04/ sat there full of
+  # demos recorded on this very lane. Same defect as the five other pinned paths
+  # called out at the top of this file, and as mp-test.sh's 2025 defaults.
+  # $VERSION is the engine-reported version resolved in step 1 above.
+  SMOKE_DEMO="${RELEASE_SMOKE_DEMO:-}"
+  if [ -z "$SMOKE_DEMO" ]; then
+    # per-lane directory first (current layout), then the flat legacy naming
+    SMOKE_DEMO=$(ls "$BAR/refdemos/$VERSION"/*.sdfz 2>/dev/null | sort | head -1)
+    [ -n "$SMOKE_DEMO" ] || SMOKE_DEMO=$(ls "$BAR"/refdemos/*_"$VERSION".sdfz 2>/dev/null | sort | head -1)
+  fi
+  [ -n "$SMOKE_DEMO" ] || {
+    echo "FATAL: --certify given but no smoke demo recorded on engine $VERSION."
+    echo "       Searched: refdemos/$VERSION/*.sdfz and refdemos/*_$VERSION.sdfz"
+    echo "       A demo from another engine version CANNOT certify this one --"
+    echo "       replay-check.sh refuses it as VERSION_MISMATCH. Record a demo on"
+    echo "       this lane, or point RELEASE_SMOKE_DEMO at one."
+    exit 1; }
+  echo "smoke demo: $(basename "$SMOKE_DEMO") (engine $VERSION)"
   ENGINE_BUILD="$BUILD" "$BAR/scripts/replay-check.sh" "$SMOKE_DEMO" \
     || { echo "FATAL: replay certification failed"; exit 1; }
   CERTIFIED=1
@@ -248,6 +292,34 @@ done
 # datadir (not from an sdz) — without it the engine aborts at boot with
 # "did you forget to run make install?". Ship the engine's cont/fonts.
 cp -R "$SRC/cont/fonts" "$RESOURCES/fonts"
+# cont/LuaUI/ctrlpanel.txt: BAR's own LuaUI asks the engine for this file by name
+# at boot (game/luaui/main.lua: SendCommands "ctrlpanel LuaUI/ctrlpanel.txt"), and
+# it is NOT inside any sdz — the engine can only find it as a LOOSE file on a
+# datadir, exactly like cont/fonts above. It sets `frameAlpha 0.0`, which is what
+# suppresses the engine's built-in command panel; BAR draws its own.
+# When it is missing, CGuiHandler::ReloadConfigFromFile reads an empty string and
+# LoadConfig() silently leaves the compiled-in defaults standing (frameAlpha -1 ->
+# guiAlpha 0.8), so the engine paints a flat grey 0.2/0.2/0.2 quad in the lower
+# left the moment anything is selected — visible to players in the gap between
+# BAR's minimap and its grid build menu. Every release up to and including the
+# v0.13 RC shipped without it; official Windows/Linux installs ship it loose,
+# which is why the box is macOS-only. See DEVLOG 2026-08-08.
+# Only this one file, NOT all of cont/LuaUI: with devmode on, LuaUI.cpp loads at
+# SPRING_VFS_RAW_FIRST, so a loose main.lua would shadow BAR's own UI.
+mkdir -p "$RESOURCES/LuaUI"
+cp "$SRC/cont/LuaUI/ctrlpanel.txt" "$RESOURCES/LuaUI/ctrlpanel.txt"
+# cmdcolors.txt is the SAME class and the only other file in it (2026-08-08 audit
+# of every loose file in the official Windows/Linux archives). Game.cpp:771 reads
+# it raw-FS-first and unconditionally; missing, LoadConfigFromString("") is a
+# no-op and the engine's compiled-in defaults stand — solid command lines instead
+# of dashed, different alphas — with no error surfaced, exactly like ctrlpanel.
+# BAR's Cursor widget normally re-specifies all 57 keys from
+# cmdcolors_icexuick.txt, so this is belt-and-braces rather than a live bug: it
+# only shows for the first few frames, and for a player who disables that widget.
+# 3 KB, cannot shadow anything, and it restores exact parity with Windows/Linux.
+cp "$SRC/cont/cmdcolors.txt" "$RESOURCES/cmdcolors.txt"
+test -s "$RESOURCES/LuaUI/ctrlpanel.txt" || { echo "FATAL: cont/LuaUI/ctrlpanel.txt missing from $SRC"; exit 1; }
+test -s "$RESOURCES/cmdcolors.txt" || { echo "FATAL: cont/cmdcolors.txt missing from $SRC"; exit 1; }
 if [ "$PROFILE" = "bar" ]; then
   # BAR launcher config (chobby_config.json + default springsettings), extracted
   # from the canonical dist_cfg the official launcher uses; the launcher deploys
@@ -255,6 +327,25 @@ if [ "$PROFILE" = "bar" ]; then
   # black-screens (game=generic -> Chobby shuts down).
   python3 "$PKG/extract-launcher-config.py" "$BAR/chobby/dist_cfg/config.json" "$RESOURCES" \
     || { echo "FATAL: could not extract BAR launcher config from dist_cfg"; exit 1; }
+  # BAR_CONTENT_TAGS: DIAGNOSTIC ONLY. Overrides the rapid tags the bundle
+  # downloads (normally byar:test + byar-chobby:test, i.e. exactly what the
+  # official launcher installs). Its only sanctioned use is bisecting a BAR
+  # CONTENT regression by pinning `byar:git:<sha>` -- e.g. proving that the
+  # 2026-08-04 HUD breakage arrived with content 30868 and is absent on 30711.
+  # NEVER ship a build made with this: it puts players on non-standard content,
+  # which is unwelcome to BAR maintainers and wrong for online play (user
+  # decision 2026-08-04). Hence the shouty banner and the marker file.
+  if [ -n "${BAR_CONTENT_TAGS:-}" ]; then
+    printf '%s\n' "$BAR_CONTENT_TAGS" > "$RESOURCES/content_tags"
+    printf 'DIAGNOSTIC BUILD - content pinned to:\n%s\nNOT FOR DISTRIBUTION.\n' \
+      "$BAR_CONTENT_TAGS" > "$RESOURCES/PINNED-CONTENT-DO-NOT-SHIP.txt"
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "!!  DIAGNOSTIC BUILD: content tags OVERRIDDEN"
+    printf '!!  %s\n' $BAR_CONTENT_TAGS
+    echo "!!  This bundle installs NON-STANDARD game content."
+    echo "!!  Do NOT distribute it. Do NOT use it for online play."
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  fi
   if [ "$ENABLE_ONLINE" != "1" ]; then
     # Neuter the lobby-server endpoint so online play cannot connect:
     #   host: online-play-disabled.localhost — .localhost is a reserved TLD
@@ -412,6 +503,42 @@ done
 [ "$AUDIT_FAIL" = "0" ] || exit 1
 echo "bundle closure audit: all references bundle-relative, resolvable, or system"
 
+# Strip debug symbol tables from every bundled Mach-O. A RELWITHDEBINFO link
+# records one OSO debug-map entry per object file, each holding the ABSOLUTE
+# path of the .o/.a it came from — 875 of them in `spring` alone, i.e. the
+# builder's home directory, inside a notarized artifact. v0.12 shipped exactly
+# that. `strings` does NOT reveal them (it reads only __TEXT), which is why the
+# LESSON-41 scan, which caught Mesa's drirc strings, missed this whole class.
+# -S drops the debug (STABS) entries only and keeps the regular symbol table,
+# so crash backtraces still resolve function names. Must run before codesign:
+# stripping a signed Mach-O invalidates its signature.
+while IFS= read -r m; do
+  case "$(file -b "$m" 2>/dev/null)" in *Mach-O*) ;; *) continue;; esac
+  chmod u+w "$m" 2>/dev/null || true
+  strip -S "$m" 2>/dev/null || true
+done <<EOF
+$(find "$APP" -type f \( -perm -u+x -o -name '*.dylib' \) 2>/dev/null)
+EOF
+echo "debug symbol tables stripped from bundled Mach-Os"
+
+# Builder-path audit. Scan the ARTIFACT and hard-fail: whatever reaches
+# this point is about to be signed, notarized and published, and publishing
+# cannot be undone. Uses a raw byte grep, NOT `strings` — `strings` reads only
+# the text section by default and silently misses debug-map paths (LESSON-41).
+PATHLEAK_FAIL=0
+while IFS= read -r m; do
+  hits="$(LC_ALL=C grep -a -o '/Users/[^ "]\{0,120\}' "$m" 2>/dev/null | sort -u || true)"
+  if [ -n "$hits" ]; then
+    echo "FATAL: ${m#"$APP"/} embeds $(echo "$hits" | wc -l | tr -d ' ') builder path(s):"
+    echo "$hits" | head -5 | sed 's/^/    /'
+    PATHLEAK_FAIL=1
+  fi
+done <<EOF
+$(find "$APP" -type f 2>/dev/null)
+EOF
+[ "$PATHLEAK_FAIL" = "0" ] || { echo "FATAL: refusing to package an artifact containing builder paths — see LESSON-41"; exit 1; }
+echo "builder-path audit: no /Users/ paths anywhere in the bundle"
+
 # Info.plist — version string clearly identifies the mac port build
 # (SYNC_VALIDATION.md §6: server-side triage must be trivial).
 # Profile decides identity: the BAR helper app presents as the game client
@@ -481,6 +608,39 @@ if [ "$PROFILE" = "bar" ]; then
   xattr -wx com.apple.metadata:kMDItemKeywords "$KEYWORDS_HEX" "$APP"
   echo "spotlight keywords staged"
 fi
+
+# ---- loose-file manifest gate -------------------------------------------------
+# Some files the engine needs resolve ONLY from the raw filesystem on a datadir,
+# never from an .sdz, and the launcher gives the bundle exactly ONE read-only
+# datadir: Resources. We hand-pick what to copy out of the engine's cont/ tree,
+# so "forgot to copy it" is a permanent, silent failure mode -- cont/LuaUI/
+# ctrlpanel.txt was missing for v0.11, v0.12 and the v0.13 RC and nothing caught
+# it, because the file's absence is indistinguishable from an empty file to the
+# engine (it logs "Reloading GUI config from file: ..." either way).
+#
+# So state the required set ONCE, here, and assert it. A `cp` accidentally
+# dropped upstream of this now fails the build instead of shipping.
+# Adding a file to this list is the ONLY correct way to change what we require.
+echo "=== [3z/7] loose-file manifest (files the engine can only read raw)"
+REQUIRED_LOOSE=(
+  "fonts/FreeSansBold.otf"      # engine aborts at boot without it
+  "LuaUI/ctrlpanel.txt"         # frameAlpha 0.0 -> suppresses the engine's own command panel
+  "cmdcolors.txt"               # command-line colours/stipple; same silent-default failure mode
+)
+_loose_missing=0
+for rel in "${REQUIRED_LOOSE[@]}"; do
+  if [ -s "$RESOURCES/$rel" ]; then
+    echo "  ok      $rel"
+  else
+    echo "  MISSING $rel"
+    _loose_missing=1
+  fi
+done
+[ "$_loose_missing" = "0" ] || {
+  echo "FATAL: a required loose file is missing from the bundle's Resources."
+  echo "       These cannot come from an archive; the engine reads them off the"
+  echo "       datadir or silently does without. See DEVLOG 2026-08-08 (later)."
+  exit 1; }
 
 echo "=== [4/7] license collection + audit"
 mkdir -p "$RESOURCES/LICENSES"

@@ -36,6 +36,7 @@ BUILD="${ENGINE_BUILD:-$BAR/build-engine}"
 # MESA_PREFIX: which driver install the engine links against (absolute
 # install-name — the binary is bound to THIS prefix's libEGL at runtime;
 # release bundles rewrite it to @rpath at staging).
+[ -n "${MESA_PREFIX:-}" ] && MESA_PREFIX_EXPLICIT=1 || MESA_PREFIX_EXPLICIT=""
 MESA_PREFIX="${MESA_PREFIX:-$DEPS/mesa-native}"
 MESA_LIBEGL="$MESA_PREFIX/lib/libEGL.dylib"
 # Ensure the graphics driver exists before building — so a single command builds
@@ -65,6 +66,31 @@ PREFIX_MAP="-ffile-prefix-map=$BAR=. -fdebug-prefix-map=$BAR=."
 # NOT clear the per-config *_RELWITHDEBINFO flags, so carrying PREFIX_MAP there
 # too reaches pr-downloader. Both the engine and pr-downloader build
 # RELWITHDEBINFO, so this is belt-and-suspenders (harmless if applied twice).
+
+# SOURCE-TREE GUARD (2026-08-07). `cmake --fresh` silently RE-POINTS an existing
+# build dir at whatever -S it is handed, and SRC defaults to $BAR/engine — so
+# running this script without ENGINE_SRC against a build dir that was configured
+# from a DIFFERENT tree (e.g. build-engine-2025.06.24-perfpin <- engine-2025.06.24)
+# quietly rebases it onto the stale tree. Burned once: the perf-pin build was
+# re-pointed at the July `engine/` tree, the edited file never recompiled (right
+# edit, wrong tree), and the failure surfaced as an unrelated BARb compile error
+# that sent the diagnosis off in the wrong direction entirely. Refuse instead.
+if [ -f "$BUILD/CMakeCache.txt" ]; then
+  PREV_SRC=$(awk -F= '/^CMAKE_HOME_DIRECTORY:INTERNAL=/{print $2}' "$BUILD/CMakeCache.txt")
+  if [ -n "$PREV_SRC" ] && [ "$PREV_SRC" != "$SRC" ]; then
+    if [ "${ENGINE_ALLOW_SRC_SWITCH:-0}" = 1 ]; then
+      echo "WARNING: re-pointing $BUILD from $PREV_SRC to $SRC (ENGINE_ALLOW_SRC_SWITCH=1)"
+    else
+      echo "FATAL: $BUILD was configured from a DIFFERENT source tree."
+      echo "  build dir was configured from: $PREV_SRC"
+      echo "  this invocation would use:     $SRC"
+      echo "  Building anyway would compile the WRONG TREE and silently ignore your edits."
+      echo "  Fix: ENGINE_SRC=$PREV_SRC $0 $*"
+      echo "  Or, if the switch is intended: ENGINE_ALLOW_SRC_SWITCH=1 $0 $*"
+      exit 1
+    fi
+  fi
+fi
 
 cmake --fresh -S "$SRC" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=RELWITHDEBINFO \
@@ -121,11 +147,11 @@ fi
 #    homebrew gcc and relink. Gate: 9/9 hash match vs the gcc x86 VM reference.
 if [ -f "$SRC/rts/lib/streflop/libm/dbl-64/w_aliases.cpp" ]; then
   LANE=glibc-import
-  REF="$BAR/logs/double-fn-2025lane-clang.txt"
+  REF="$BAR/testkit/libm-refs/double-fn-2025lane-clang.txt"
   echo "streflop lane: glibc-import (pure clang, no dbl-64 swap)"
 else
   LANE=submodule
-  REF="$BAR/logs/double-fn-vm26.txt"
+  REF="$BAR/testkit/libm-refs/double-fn-vm26.txt"
   "$BAR/scripts/gcc-dbl64-swap.sh" "$BUILD"
   for tgt in spring spring-headless; do
     (cd "$BUILD" && eval "$(ninja -t commands "$tgt" | tail -1)")
@@ -134,7 +160,17 @@ fi
 
 # Verification gate: the archive must reproduce the lane's reference libm
 # hashes; hard-fails the build otherwise.
-if [ -f "$REF" ] && [ -f "$BAR/scripts/dfp-small.cpp" ]; then
+# FAIL CLOSED. This used to be a bare `if [ -f "$REF" ]` with no else, and the
+# references lived in gitignored logs/ — so on a fresh clone, a new machine, or
+# after anyone cleaned logs/, the ONLY artifact-level FP-parity check silently
+# vanished and the build still printed ENGINE_BUILD_OK. "The reference is
+# missing" is not consent; it is the one condition under which this gate must
+# shout. (Adversarial harness audit, 2026-08-07.)
+for _req in "$REF" "$BAR/scripts/dfp-small.cpp"; do
+  [ -f "$_req" ] || { echo "FATAL: libm parity gate cannot run — missing $_req"; \
+                      echo "  (lane=$LANE) Refusing to report a build as good without it."; exit 2; }
+done
+if true; then
   # fastiroot shim is only needed (and only links) on trees whose streflop
   # exports streflop_libm::fastiroot (the 2026 lane); detect from the archive.
   SHIM=()
@@ -159,6 +195,18 @@ fi
 echo "NOTE: do not run bare 'ninja' in $BUILD afterwards — it clobbers the"
 echo "gcc-swapped dbl-64 objects. Always rebuild via this script."
 
+# Stage the SAME loose cont/ files packaging/release-build.sh puts in the bundle's
+# Resources, so the tree the gates run against matches what players actually get.
+# This tree used to be RICHER than the product: cmake wrote a SpringData line
+# pointing at a second datadir (<srcdir>/cont), which is how ctrlpanel.txt was
+# reaching the engine here but not in the bundle -- so visreg could not see the
+# missing-ctrlpanel bug. That path is now stale anyway (it names engine-<lane>/cont,
+# renamed to engine/ in the 2026-08-07 lane move) and cont/CMakeLists.txt will not
+# regenerate an existing springsettings.cfg. Staging explicitly is the honest fix:
+# if the bundle stops shipping a file, the gate stops seeing it too.
+mkdir -p "$BUILD/LuaUI"
+cp "$SRC/cont/LuaUI/ctrlpanel.txt" "$BUILD/LuaUI/ctrlpanel.txt"
+
 echo "=== artifact verification ==="
 for b in spring spring-headless; do
   test -f "$BUILD/$b" || { echo "FATAL: $b missing"; exit 1; }
@@ -179,6 +227,15 @@ if [ "$WITH_VISREG" = "1" ]; then
   echo "=== opt-in: visreg (visual/artifact regression$([ "$WITH_PERF" = 1 ] && echo ", perf gate"))"
   VISREG_ARGS=()
   [ "$WITH_PERF" = "1" ] && VISREG_ARGS+=(--perf)
-  VISREG_BUILD="$BUILD" VISREG_MESA="$MESA_PREFIX" \
+  # Pin the ENGINE we just built, but leave the DRIVER to ship-config unless the
+  # caller overrode it. Forcing VISREG_MESA="$MESA_PREFIX" here sent the gate the
+  # BUILD-TIME driver default (deps/mesa-native — stale and unstamped), so the
+  # suite silently tested a mixed pair while a bare ./scripts/visreg.sh tested
+  # the shipped one: the same run reported PASS standalone and FAIL (18 lines,
+  # diff_frac=0.4485) inside the suite, on one identical engine. That is exactly
+  # the drift packaging/ship-config.sh exists to prevent, bypassed by the script
+  # that calls it (LESSON-51). Engine and driver are independent axes; building
+  # an engine says nothing about which driver we intend to ship.
+  VISREG_BUILD="$BUILD" ${MESA_PREFIX_EXPLICIT:+VISREG_MESA="$MESA_PREFIX"} \
     "$BAR/scripts/visreg.sh" ${VISREG_ARGS[@]+"${VISREG_ARGS[@]}"}
 fi

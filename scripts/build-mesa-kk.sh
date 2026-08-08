@@ -152,15 +152,61 @@ INI
 source "$DEPS/mesa-venv/bin/activate"
 export PATH="$L19/bin:$DEPS/mesa-venv/bin:/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PATH"
 export LIBRARY_PATH="/opt/homebrew/lib"
-rm -rf build-native
+# Mesa compiles its *install prefix* into the driver (SYSCONFDIR/DATADIR, used
+# to locate drirc at runtime). The -ffile-prefix-map/-fdebug-prefix-map flags
+# set above remap SOURCE paths only and do not touch it, so building straight
+# into a $HOME-based prefix embeds the builder's username in libEGL,
+# libgallium and libvulkan_kosmickrisp -- which is how v0.12 shipped
+# /Users/<builder>/... inside notarized, publicly downloadable dylibs
+# (LESSON-41). Build against a neutral prefix and relocate at install time.
+# Install names are rewritten to @rpath by packaging/release-build.sh either
+# way, so the neutral prefix costs nothing at link time.
+NEUTRAL_PREFIX="/opt/bar-driver"
+STAGE="$DEPS/mesa-stage"
+
+rm -rf build-native "$STAGE"
 meson setup build-native --native-file "$DEPS/plain-native.ini" \
   --pkg-config-path "$DEPS/spirv-xlat-install/lib/pkgconfig" \
-  -Dprefix="$MESA_PREFIX" -Dplatforms=macos \
+  -Dprefix="$NEUTRAL_PREFIX" -Dplatforms=macos \
   -Degl-native-platform=surfaceless -Degl=enabled -Dglx=disabled \
   -Dgallium-drivers=zink -Dvulkan-drivers=kosmickrisp \
   -Dmoltenvk-dir=/opt/homebrew/opt/molten-vk \
   -Dllvm=enabled -Dshared-llvm=disabled -Dbuildtype=release
-ninja -C build-native install
+DESTDIR="$STAGE" ninja -C build-native install
+
+# relocate the neutral prefix tree into the real install location
+test -d "$STAGE$NEUTRAL_PREFIX" || { echo "FATAL: staged install missing $STAGE$NEUTRAL_PREFIX"; exit 1; }
+mkdir -p "$MESA_PREFIX"
+(cd "$STAGE$NEUTRAL_PREFIX" && tar cf - .) | (cd "$MESA_PREFIX" && tar xf -)
+rm -rf "$STAGE"
+
+# meson baked the neutral prefix into each dylib's install name (LC_ID_DYLIB)
+# and into its inter-library dependencies. /opt/bar-driver does not exist on
+# this machine, so unless these are repointed nothing OUTSIDE a bundle can load
+# the driver — visreg, perf-bench, run-spring.sh and the certify replay all run
+# the raw binary against $MESA_PREFIX. packaging/release-build.sh rewrites these
+# to @rpath when it stages the .app, and its builder-path audit scans the
+# resulting bundle, so the absolute path used here never reaches a shipped
+# artifact.
+for d in "$MESA_PREFIX"/lib/*.dylib; do
+  [ -L "$d" ] && continue
+  chmod u+w "$d"
+  install_name_tool -id "$MESA_PREFIX/lib/$(basename "$d")" "$d" 2>/dev/null || true
+  for dep in $(otool -L "$d" | tail -n +2 | awk '{print $1}' | grep "^$NEUTRAL_PREFIX/" || true); do
+    install_name_tool -change "$dep" "$MESA_PREFIX/lib/$(basename "$dep")" "$d" 2>/dev/null || true
+  done
+done
+echo "install names repointed from $NEUTRAL_PREFIX to $MESA_PREFIX"
+
+# The ICD json's library_path is absolute and now names the neutral prefix,
+# which does not exist. Repoint it at the real install location so non-bundled
+# runs (visreg, perf-bench, run-spring.sh) can still load the driver; packaging
+# rewrites this to a bundle-relative path when it stages the .app, so nothing
+# absolute reaches a shipped artifact.
+for j in "$MESA_PREFIX"/share/vulkan/icd.d/*.json; do
+  [ -f "$j" ] || continue
+  sed -i '' "s|\"library_path\": \".*\"|\"library_path\": \"$MESA_PREFIX/lib/libvulkan_kosmickrisp.dylib\"|" "$j"
+done
 
 echo "=== [4/4] Artifact verification ==="
 test -f "$MESA_PREFIX/lib/libEGL.dylib" || { echo "FATAL: libEGL.dylib missing"; exit 1; }
@@ -168,6 +214,19 @@ test -f "$MESA_PREFIX/lib/libvulkan_kosmickrisp.dylib" || { echo "FATAL: kosmick
 file "$MESA_PREFIX/lib/libEGL.dylib" | grep -q arm64 || { echo "FATAL: libEGL not arm64"; exit 1; }
 ls "$MESA_PREFIX/lib/"*.dylib
 ls "$MESA_PREFIX/share/vulkan/icd.d/" 2>/dev/null || true
+
+# LESSON-41: a hygiene claim about a binary must be verified BY GREPPING THE
+# BINARY, never inferred from the compiler flags. Any absolute /Users/ path
+# compiled into a driver dylib is a leak the moment the bundle is notarized.
+# NB: raw byte grep, not `strings` — `strings` reads only the text section and
+# silently misses debug-map/symbol-table paths.
+leaks=0
+for d in "$MESA_PREFIX"/lib/*.dylib; do
+  hits="$(LC_ALL=C grep -a -o '/Users/[^ "]\{0,120\}' "$d" 2>/dev/null | sort -u || true)"
+  [ -z "$hits" ] || { n=$(echo "$hits" | wc -l | tr -d ' '); echo "FATAL: $(basename "$d") embeds $n /Users/ path(s):"; echo "$hits" | head -5 | sed 's/^/    /'; leaks=$((leaks+n)); }
+done
+[ "$leaks" -eq 0 ] || { echo "FATAL: driver embeds $leaks builder-path string(s) — see LESSON-41"; exit 1; }
+echo "driver path-leak scan: 0 /Users/ strings across $(ls "$MESA_PREFIX"/lib/*.dylib | wc -l | tr -d ' ') dylibs"
 
 # stamp the provenance so subsequent builds are a no-op until the pin/patches change
 printf '%s\n' "$WANT" > "$STAMP_FILE"
