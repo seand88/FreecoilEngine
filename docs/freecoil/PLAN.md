@@ -126,10 +126,20 @@ separate animator would duplicate all of that for no gain.
 
 Official Recoil ships no macOS binaries; the machine runs benbreen's Apple-silicon
 fork through the BAR launcher. Freecoil is a fork assembled from three layers:
-upstream master, the replayed macOS layer, and the animation layer. Deliverable: a
-reproducible Mac build of upstream master plus the macOS layer, with the Recoil
-Frenzy game repo running against it, before any animation code is touched. The
-upstream Docker Linux build stays available for headless sim tests.
+upstream master, the replayed macOS layer, and the animation layer. Deliverables,
+all required before any animation code is considered verified:
+
+1. A reproducible **macOS build** of `main` via the fork's `make engine`.
+2. A reproducible **Windows build** of the same commit via upstream's Docker
+   cross-build (`docker-build-v2/build.sh windows`), and a Linux build for headless
+   sim tests. The macOS layer is `__APPLE__`-gated and must not change the Windows
+   or Linux code paths; the Windows build is how that is proven, not assumed.
+3. The Recoil Frenzy game repo running against the Mac build.
+
+Freecoil is cross-platform only if a Mac client and a Windows client simulate
+bit-identically. So the cross-platform sync gate (section 10) is part of the
+definition of done for every phase that touches synced code, starting here with the
+unmodified engine to establish the baseline.
 
 ### Phase 1. Port the prototype onto master
 
@@ -319,3 +329,31 @@ new synced code under `rts/Sim`. So:
   public servers. Freecoil builds only ever talk to Freecoil clients, so that gate does
   not apply, but a Freecoil client must never advertise itself as a BAR-compatible
   engine version.
+
+## 10. Cross-platform sync gate
+
+Freecoil must run on macOS and Windows, and lockstep multiplayer means every client
+must compute identical synced state regardless of platform or CPU architecture. One
+differing bit desyncs the game. This gate is therefore mandatory, not optional:
+
+1. **Build both**: the same commit built for macOS (arm64, Apple clang, the fork's
+   streflop NEON path) and for Windows (x86-64, the upstream Docker cross-build).
+2. **Streflop cross-architecture test**: the fork's `scripts/run-synctest.sh` must
+   report bit-exact against the committed references on the Mac build.
+3. **Cross-platform two-client sync test**: the game repo's two-client test run with
+   one client on the Mac build and one on the Windows build (a Windows machine or VM
+   on the LAN), with a scenario that exercises the changed feature. For animation
+   work: units playing clips while moving, firing and dying, mixed with S3O+COB
+   units. Both logs must be free of `sync error`, `desync` and `checksum mismatch`
+   and the joiner must stay within a few hundred frames of the host.
+4. **Replay determinism**: a demo recorded on one platform must replay with
+   `REPLAY_SYNC_OK` on the other.
+
+When to run it: at the end of Phase 0 on the unmodified engine (baseline), after
+Phase 1 (port), after Phase 2 (sync fixes), and after any later change under
+`rts/Sim`, synced Lua, streflop, or model loading. Record each run's result and the
+commit it tested in `docs/freecoil/VERSIONS.md`.
+
+Until a Windows machine is available, the Windows build still gets produced by the
+Docker pipeline as a compile check, and the cross-platform test is listed as not run
+rather than assumed to pass.

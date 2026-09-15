@@ -53,7 +53,14 @@ checks below have been run and reported.
    work: units playing clips while moving and firing).
 3. **Replay determinism** when available: record a demo and confirm the fork's
    replay check reports `REPLAY_SYNC_OK`.
-4. **Report the result explicitly.** State which checks ran and their output. If a
+4. **Cross-platform sync gate**: Freecoil targets macOS and Windows, and a Mac
+   client and a Windows client must simulate bit-identically. Build the same commit
+   for both (fork `make engine` for macOS, upstream `docker-build-v2/build.sh
+   windows` for Windows) and run the two-client sync test with one client on each.
+   If no Windows machine is available, still produce the Windows build as a compile
+   check and report the cross-platform test as NOT RUN, never as passed. Details in
+   `PLAN.md` section 10.
+5. **Report the result explicitly.** State which checks ran and their output. If a
    check could not be run, say so; do not report the change as done.
 
 If a conflict during a rebase or merge forces a change under `rts/Sim/` or streflop,
