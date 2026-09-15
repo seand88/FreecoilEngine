@@ -1,3 +1,12 @@
+# Freecoil
+
+This is Freecoil, a fork of the Recoil engine. Before anything else read
+`docs/freecoil/AGENTS.md`: deterministic networked simulation is the most important
+property of this engine and every change must be checked for it before it is
+reported as done. The plan is in `docs/freecoil/PLAN.md`, pins in `docs/freecoil/VERSIONS.md`.
+
+---
+
 # AGENTS.md - Coding Agent Guidelines for RecoilEngine
 
 This document provides essential information for AI coding agents working on the RecoilEngine codebase.
