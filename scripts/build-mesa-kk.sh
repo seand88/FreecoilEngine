@@ -71,7 +71,7 @@ fi
 
 echo "=== [1/4] Homebrew dependencies ==="
 # Engine deps + Mesa build deps. Individually so one failure doesn't kill the rest.
-for pkg in sdl2 libpng libjpeg-turbo libogg libvorbis freetype glm libomp \
+for pkg in cmake ninja sdl2 libpng libjpeg-turbo libogg libvorbis freetype glm libomp \
            vulkan-headers vulkan-loader molten-vk devil ccache \
            meson pkg-config bison flex llvm@19 libclc glslang spirv-tools \
            p7zip openal-soft minizip; do
