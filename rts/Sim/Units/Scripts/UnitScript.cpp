@@ -252,6 +252,21 @@ void CUnitScript::TickAllAnims(int deltaTime)
 		checksum = spring::LiteHash(ai, checksum);
 	}
 
+	// checksum the embedded (clip) animation players too, they drive piece state
+	for (const auto& ap : animPlayers) {
+		if (!ap.isActive)
+			continue;
+
+		checksum = spring::LiteHash(ap.currentTime, checksum);
+		checksum = spring::LiteHash(ap.playSpeed,   checksum);
+		checksum = spring::LiteHash(ap.weight,      checksum);
+		checksum = spring::LiteHash(ap.loopMode,    checksum);
+		checksum = spring::LiteHash(ap.isAdditive,  checksum);
+
+		if (!ap.pieceWeights.empty())
+			checksum = spring::LiteHash(ap.pieceWeights.data(), static_cast<unsigned>(ap.pieceWeights.size() * sizeof(float)), checksum);
+	}
+
 	spring::VectorEraseIfAll(anims, [](const auto& ai) { return ai.done; });
 #if 1
 	// BFS pass
@@ -480,7 +495,7 @@ void CUnitScript::TickEmbeddedAnim(int tickRate)
 		if (animPlayer.loopMode != 0) {
 			// Loop (forward or reverse): wrap time into [0, duration) using floor-based modulo,
 			// which handles negative currentTime (reverse playback) correctly.
-			animPlayer.currentTime = animPlayer.currentTime - std::floor(animPlayer.currentTime / duration) * duration;
+			animPlayer.currentTime = animPlayer.currentTime - math::floor(animPlayer.currentTime / duration) * duration;
 		} else {
 			// No loop: clamp and fire completion
 			if (animPlayer.playSpeed >= 0.0f) {
