@@ -545,7 +545,9 @@ void CGLTFParser::Load(S3DModel& model, const std::string& modelFilePath)
 			Skinning::ReparentMeshesTrianglesToBones(&model, allSkinnedMeshes);
 	}
 
-	static auto AssignValues = [&asset]<typename T>(const auto& outputAccessor, auto& seq, size_t numKeyframes, bool isCubic) {
+	// NOTE: keyframes are stored in the engine model frame, the same conversion
+	// that is baked into piece offsets / rest rotations / vertices at load time.
+	auto AssignValues = [&asset, sourceConvention]<typename T>(const auto& outputAccessor, auto& seq, size_t numKeyframes, bool isCubic) {
 		auto AssignCubicValues = [&seq](auto&& value, size_t n) {
 			const size_t ki = n / 3, kj = n % 3;
 
@@ -566,22 +568,22 @@ void CGLTFParser::Load(S3DModel& model, const std::string& modelFilePath)
 		if constexpr(std::is_same_v<T, float3>) {
 			if (isCubic) {
 				fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec3>(asset, outputAccessor, [&](const auto& v, size_t j) {
-					AssignCubicValues(float3(v.x(), v.y(), v.z()), j);
+					AssignCubicValues(gltfmodel::ToEngineSpace(float3(v.x(), v.y(), v.z()), sourceConvention), j);
 				});
 			} else {
 				fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec3>(asset, outputAccessor, [&](const auto& v, size_t) {
-					seq.values.emplace_back(v.x(), v.y(), v.z());
+					seq.values.push_back(gltfmodel::ToEngineSpace(float3(v.x(), v.y(), v.z()), sourceConvention));
 				});
 			}
 		}
 		else if constexpr(std::is_same_v<T, CQuaternion>) {
 			if (isCubic) {
 				fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec4>(asset, outputAccessor, [&](const auto& v, size_t j) {
-					AssignCubicValues(CQuaternion(v.x(), v.y(), v.z(), v.w()), j);
+					AssignCubicValues(gltfmodel::ToEngineSpace(CQuaternion(v.x(), v.y(), v.z(), v.w()), sourceConvention), j);
 				});
 			} else {
 				fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec4>(asset, outputAccessor, [&](const auto& v, size_t) {
-					seq.values.emplace_back(v.x(), v.y(), v.z(), v.w());
+					seq.values.push_back(gltfmodel::ToEngineSpace(CQuaternion(v.x(), v.y(), v.z(), v.w()), sourceConvention));
 				});
 			}
 		}
